@@ -28,10 +28,6 @@ keys/
 !jsconfig.json
 !tsconfig.json
 
-# Si decides exponer ejemplo de credenciales:
-# !keys/.gitkeep
-# !keys/example.json
-
 # ====================================
 # Logs
 # ====================================

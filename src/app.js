@@ -14,13 +14,17 @@ const app = Fastify({
 await app.register(helmet)
 await app.register(cors, {
   origin: (origin, cb) => {
-    if (!origin || config.allowedOrigins.includes(origin)) {
+    // Permitir requests sin origin (Postman, curl, etc.)
+    if (!origin) return cb(null, true)
+    
+    if (config.allowedOrigins.includes(origin)) {
       return cb(null, true)
     }
     cb(new Error('Origen no permitido'), false)
   },
-  methods: ['GET', 'POST', 'PUT', 'OPTIONS'],
-  allowedHeaders: ['Content-Type']
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],  // ← AGREGAR Authorization
+  credentials: true
 })
 
 // Rutas

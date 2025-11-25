@@ -16,23 +16,48 @@ export const config = {
   
   sheets: {
     spreadsheetId: process.env.GOOGLE_SHEET_ID,
-    sheetName: 'Inscripciones'
+    sheetName: process.env.GOOGLE_SHEET_NAME || 'Inscripciones',
+  },
+
+  db: {
+    host: process.env.DB_HOST,
+    port: parseInt(process.env.DB_PORT || '3306', 10),
+    name: process.env.DB_NAME,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+  },
+
+  jwt: {
+    secret: process.env.JWT_SECRET,
+    expiresIn: process.env.JWT_EXPIRES_IN || '1h',
+    refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
   },
   
-  publicBaseUrl: process.env.PUBLIC_BASE_URL || 'http://127.0.0.1:3000'
+  publicBaseUrl: process.env.PUBLIC_BASE_URL || 'http://127.0.0.1:3000',
 }
 
-// Validacion de las variables de entorno importantes
-const required = [
-  'gcp.projectId',
-  'gcp.credentialsPath',
-  'gcp.bucket',
-  'sheets.spreadsheetId'
+// Validación de variables críticas
+const requiredEnvVars = [
+  ['db.host', config.db.host],
+  ['db.name', config.db.name],
+  ['jwt.secret', config.jwt.secret]
 ]
 
-for (const key of required) {
-  const value = key.split('.').reduce((obj, k) => obj?.[k], config)
+if (config.isProduction) {
+  requiredEnvVars.push(
+    ['gcp.projectId', config.gcp.projectId],
+    ['gcp.credentialsPath', config.gcp.credentialsPath],
+    ['gcp.bucket', config.gcp.bucket]
+  )
+}
+
+for (const [name, value] of requiredEnvVars) {
   if (!value) {
-    throw new Error(`Estas variables de entorno estan faltando: ${key}`)
+    console.warn(`Variable de entorno faltante: ${name}`)
   }
+}
+
+// JWT validacion de caracteres
+if (config.isProduction && config.jwt.secret.length < 32) {
+  throw new Error('JWT_SECRET debe tener al menos 32 caracteres en producción')
 }
