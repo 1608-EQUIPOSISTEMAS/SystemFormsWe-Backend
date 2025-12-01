@@ -197,7 +197,7 @@ class OdooService {
   async getCertificateData(certificateId) {
     const result = await this.call('issued.certificates', 'search_read', [], {
       domain: [['id', '=', certificateId]],
-      fields: []
+      fields: ['id', 'state', 'code', 'pdf_certificate_file']
     })
 
     if (!result.ok) return result
@@ -208,23 +208,16 @@ class OdooService {
 
     const cert = result.result[0]
     
-    console.log('📄 Certificado completo de Odoo:', JSON.stringify(cert, null, 2))
+    console.log('📄 Certificado ID:', cert.id, 'State:', cert.state, 'Code:', cert.code)
 
-    // Construir URL del PDF
-    let pdfUrl = null
-    
-    if (cert.pdf_certificate_file && typeof cert.pdf_certificate_file === 'string' && cert.pdf_certificate_file !== 'false') {
-      if (cert.pdf_certificate_file.startsWith('http')) {
-        pdfUrl = cert.pdf_certificate_file
-      } else {
-        pdfUrl = `${this.baseUrl}${cert.pdf_certificate_file}`
-      }
-    }
-    
-    // URL de descarga directa si tiene el campo
-    if (!pdfUrl && cert.id) {
-      pdfUrl = `${this.baseUrl}/web/content/issued.certificates/${cert.id}/pdf_certificate_file?download=true`
-    }
+    // Verificar si tiene PDF
+    const hasPdf = cert.pdf_certificate_file && 
+                  typeof cert.pdf_certificate_file === 'string' && 
+                  cert.pdf_certificate_file !== 'false' &&
+                  cert.pdf_certificate_file.length > 100
+
+    // Si tiene contenido base64, usar URL de descarga directa de Odoo
+    const pdfUrl = `${this.baseUrl}/web/content/issued.certificates/${cert.id}/pdf_certificate_file?download=true`
 
     return {
       ok: true,
@@ -233,7 +226,7 @@ class OdooService {
         pdf_url: pdfUrl,
         state: cert.state,
         code: cert.code || null,
-        has_pdf: cert.pdf_certificate_file && cert.pdf_certificate_file !== false
+        has_pdf: hasPdf
       }
     }
   }

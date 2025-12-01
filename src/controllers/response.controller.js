@@ -267,9 +267,11 @@ export class ResponseController {
 
       // 8. CERTIFICACIÓN EN ODOO
       let odooResult = null
-      
+
       if (isExam && passed && form.requires_odoo_validation && odoo_partner_id && form.odoo_course_name) {
         try {
+          console.log('🎯 Iniciando proceso de certificación...')
+          
           const certResult = await odooService.certifyStudent(
             {
               partner_id: odoo_partner_id,
@@ -283,13 +285,22 @@ export class ResponseController {
             }
           )
 
+          console.log('🎯 Resultado certificación:', certResult.ok ? 'OK' : 'FAIL')
+
           if (certResult.ok) {
+            console.log('🎯 Guardando en BD...', {
+              certificate_id: certResult.certificate.id,
+              pdf_url: certResult.certificate.pdf_url?.substring(0, 100) + '...'
+            })
+            
             await connection.query(`
               UPDATE form_responses SET
                 odoo_certificate_id = ?,
                 odoo_certificate_pdf = ?
               WHERE id = ?
             `, [certResult.certificate.id, certResult.certificate.pdf_url, responseId])
+
+            console.log('🎯 Guardado en BD exitoso')
 
             odooResult = {
               certificate_id: certResult.certificate.id,
@@ -304,10 +315,14 @@ export class ResponseController {
             }
           }
         } catch (odooError) {
-          console.error('Odoo certification error:', odooError)
+          console.error('🎯 Odoo certification error:', odooError)
           odooResult = { error: true, message: 'Error al generar certificado en Odoo' }
         }
       }
+
+      console.log('🎯 Haciendo commit...')
+      await connection.commit()
+      console.log('🎯 Commit exitoso, enviando respuesta...')
 
       await connection.commit()
 
