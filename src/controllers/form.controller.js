@@ -555,4 +555,564 @@ export class FormController {
       return reply.code(500).send({ ok: false, error: 'Error al eliminar formulario' })
     }
   }
+
+
+  // ═══════════════════════════════════════
+// TOGGLE ACTIVO/INACTIVO
+// ═══════════════════════════════════════
+static async toggleActive(req, reply) {
+  const { uuid } = req.params
+  const userId = req.user?.id
+  
+  const connection = await pool.getConnection()
+  
+  try {
+    // Obtener estado actual
+    const [forms] = await connection.query(
+      'SELECT id, is_active FROM forms WHERE uuid = ? AND created_by = ?',
+      [uuid, userId]
+    )
+    
+    if (!forms.length) {
+      return reply.code(404).send({ ok: false, error: 'Formulario no encontrado' })
+    }
+    
+    const form = forms[0]
+    const newStatus = !form.is_active
+    
+    // Actualizar estado
+    await connection.query(
+      'UPDATE forms SET is_active = ?, updated_at = NOW() WHERE id = ?',
+      [newStatus ? 1 : 0, form.id]
+    )
+    
+    return reply.send({ 
+      ok: true, 
+      data: { 
+        is_active: newStatus 
+      } 
+    })
+  } finally {
+    connection.release()
+  }
 }
+
+// ═══════════════════════════════════════
+// OBTENER ESTADÍSTICAS
+// ═══════════════════════════════════════
+static async getStats(req, reply) {
+    const { uuid } = req.params
+    const userId = req.user?.id
+
+    try {
+      const connection = await pool.getConnection()
+      try {
+        // Verificar que el formulario pertenece al usuario
+        const [forms] = await connection.query(
+          'SELECT id, form_type FROM forms WHERE uuid = ? AND created_by = ?',
+          [uuid, userId]
+        )
+
+        if (forms.length === 0) {
+          return reply.code(404).send({ 
+            ok: false, 
+            error: 'Formulario no encontrado' 
+          })
+        }
+
+        const formId = forms[0].id
+        const isExam = forms[0].form_type === 'EXAM'
+
+        // Estadísticas básicas
+        const [stats] = await connection.query(`
+          SELECT 
+            COUNT(*) as total_responses,
+            COUNT(CASE WHEN status = 'SUBMITTED' THEN 1 END) as completed,
+            COUNT(CASE WHEN status = 'IN_PROGRESS' THEN 1 END) as in_progress,
+            AVG(CASE WHEN status = 'SUBMITTED' THEN percentage_score END) as avg_score,
+            MIN(submitted_at) as first_response,
+            MAX(submitted_at) as last_response
+          FROM form_responses
+          WHERE form_id = ?
+        `, [formId])
+
+        // Respuestas por día (últimos 7 días)
+        const [daily] = await connection.query(`
+          SELECT 
+            DATE(submitted_at) as date,
+            COUNT(*) as count
+          FROM form_responses
+          WHERE form_id = ? 
+            AND submitted_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
+            AND status = 'SUBMITTED'
+          GROUP BY DATE(submitted_at)
+          ORDER BY date DESC
+        `, [formId])
+
+        // Si es examen, estadísticas adicionales
+        let examStats = null
+        if (isExam) {
+          const [exam] = await connection.query(`
+            SELECT 
+              COUNT(CASE WHEN passed = 1 THEN 1 END) as passed,
+              COUNT(CASE WHEN passed = 0 THEN 1 END) as failed,
+              MAX(percentage_score) as highest_score,
+              MIN(percentage_score) as lowest_score
+            FROM form_responses
+            WHERE form_id = ? AND status = 'SUBMITTED'
+          `, [formId])
+          examStats = exam[0]
+        }
+
+        return reply.send({
+          ok: true,
+          data: {
+            total: stats[0].total_responses || 0,
+            completed: stats[0].completed || 0,
+            inProgress: stats[0].in_progress || 0,
+            avgScore: stats[0].avg_score ? Math.round(stats[0].avg_score) : null,
+            firstResponse: stats[0].first_response,
+            lastResponse: stats[0].last_response,
+            dailyResponses: daily,
+            ...(examStats && { 
+              passed: examStats.passed || 0,
+              failed: examStats.failed || 0,
+              highestScore: examStats.highest_score,
+              lowestScore: examStats.lowest_score
+            })
+          }
+        })
+
+      } finally {
+        connection.release()
+      }
+    } catch (error) {
+      req.log.error(error)
+      return reply.code(500).send({ 
+        ok: false, 
+        error: 'Error al obtener estadísticas' 
+      })
+    }
+  }
+
+
+// ═══════════════════════════════════════
+// OBTENER RESPUESTAS
+// ═══════════════════════════════════════
+static async getResponses(req, reply) {
+    const { uuid } = req.params
+    const userId = req.user?.id
+    const { page = 1, limit = 20, status, search } = req.query
+
+    try {
+      const connection = await pool.getConnection()
+      try {
+        // Verificar formulario
+        const [forms] = await connection.query(
+          'SELECT id FROM forms WHERE uuid = ? AND created_by = ?',
+          [uuid, userId]
+        )
+
+        if (forms.length === 0) {
+          return reply.code(404).send({ 
+            ok: false, 
+            error: 'Formulario no encontrado' 
+          })
+        }
+
+        const formId = forms[0].id
+        const offset = (page - 1) * limit
+
+        let whereClause = 'WHERE fr.form_id = ?'
+        const params = [formId]
+
+        if (status) {
+          whereClause += ' AND fr.status = ?'
+          params.push(status)
+        }
+
+        if (search) {
+          whereClause += ' AND (u.email LIKE ? OR u.first_name LIKE ? OR u.last_name LIKE ?)'
+          const searchTerm = `%${search}%`
+          params.push(searchTerm, searchTerm, searchTerm)
+        }
+
+        // Contar total
+        const [countResult] = await connection.query(`
+          SELECT COUNT(*) as total 
+          FROM form_responses fr
+          LEFT JOIN users u ON fr.user_id = u.id
+          ${whereClause}
+        `, params)
+
+        // Obtener respuestas
+        const [responses] = await connection.query(`
+          SELECT 
+            fr.id, fr.uuid, fr.status, fr.started_at, fr.submitted_at,
+            fr.total_score, fr.percentage_score, fr.passed,
+            u.email as respondent_email,
+            CONCAT(u.first_name, ' ', u.last_name) as respondent_name,
+            TIMESTAMPDIFF(MINUTE, fr.started_at, fr.submitted_at) as duration_minutes
+          FROM form_responses fr
+          LEFT JOIN users u ON fr.user_id = u.id
+          ${whereClause}
+          ORDER BY fr.started_at DESC
+          LIMIT ? OFFSET ?
+        `, [...params, parseInt(limit), offset])
+
+        return reply.send({
+          ok: true,
+          data: {
+            responses,
+            pagination: {
+              page: parseInt(page),
+              limit: parseInt(limit),
+              total: countResult[0].total,
+              pages: Math.ceil(countResult[0].total / limit)
+            }
+          }
+        })
+
+      } finally {
+        connection.release()
+      }
+    } catch (error) {
+      req.log.error(error)
+      return reply.code(500).send({ 
+        ok: false, 
+        error: 'Error al obtener respuestas' 
+      })
+    }
+  }
+
+// ═══════════════════════════════════════
+// EXPORTAR RESPUESTAS
+// ═══════════════════════════════════════
+static async exportResponses(req, reply) {
+    const { uuid } = req.params
+    const userId = req.user?.id
+
+    try {
+      const connection = await pool.getConnection()
+      try {
+        // Verificar formulario
+        const [forms] = await connection.query(
+          'SELECT id, title FROM forms WHERE uuid = ? AND created_by = ?',
+          [uuid, userId]
+        )
+
+        if (forms.length === 0) {
+          return reply.code(404).send({ 
+            ok: false, 
+            error: 'Formulario no encontrado' 
+          })
+        }
+
+        const formId = forms[0].id
+        const formTitle = forms[0].title
+
+        // Obtener preguntas
+        const [questions] = await connection.query(`
+          SELECT id, question_text, display_order
+          FROM questions
+          WHERE form_id = ? AND is_active = 1
+          ORDER BY display_order
+        `, [formId])
+
+        // Obtener respuestas con detalle
+        const [responses] = await connection.query(`
+          SELECT 
+            fr.id, fr.submitted_at, fr.total_score, fr.percentage_score,
+            u.email, CONCAT(u.first_name, ' ', u.last_name) as name
+          FROM form_responses fr
+          LEFT JOIN users u ON fr.user_id = u.id
+          WHERE fr.form_id = ? AND fr.status = 'SUBMITTED'
+          ORDER BY fr.submitted_at DESC
+        `, [formId])
+
+        // Obtener todas las respuestas individuales
+        const responseIds = responses.map(r => r.id)
+        let answers = []
+        
+        if (responseIds.length > 0) {
+          const [ans] = await connection.query(`
+            SELECT response_id, question_id, answer_text
+            FROM response_answers
+            WHERE response_id IN (?)
+          `, [responseIds])
+          answers = ans
+        }
+
+        // Construir CSV
+        const headers = ['Fecha', 'Email', 'Nombre', 'Puntuación']
+        questions.forEach(q => headers.push(q.question_text))
+
+        const rows = responses.map(r => {
+          const row = [
+            r.submitted_at ? new Date(r.submitted_at).toLocaleString('es-PE') : '',
+            r.email || '',
+            r.name || '',
+            r.percentage_score !== null ? `${r.percentage_score}%` : ''
+          ]
+
+          questions.forEach(q => {
+            const answer = answers.find(
+              a => a.response_id === r.id && a.question_id === q.id
+            )
+            row.push(answer?.answer_text || '')
+          })
+
+          return row
+        })
+
+        // Generar CSV
+        const csvContent = [
+          headers.map(h => `"${h.replace(/"/g, '""')}"`).join(','),
+          ...rows.map(row => 
+            row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(',')
+          )
+        ].join('\n')
+
+        reply.header('Content-Type', 'text/csv; charset=utf-8')
+        reply.header(
+          'Content-Disposition', 
+          `attachment; filename="${formTitle.replace(/[^a-zA-Z0-9]/g, '_')}_respuestas.csv"`
+        )
+        
+        return reply.send(csvContent)
+
+      } finally {
+        connection.release()
+      }
+    } catch (error) {
+      req.log.error(error)
+      return reply.code(500).send({ 
+        ok: false, 
+        error: 'Error al exportar respuestas' 
+      })
+    }
+  }
+
+// ═══════════════════════════════════════
+// OBTENER FORMULARIO PÚBLICO (sin auth)
+// ═══════════════════════════════════════
+static async getPublicForm(req, reply) {
+  const { uuid } = req.params
+
+  try {
+    const connection = await pool.getConnection()
+    try {
+      // Obtener formulario activo
+      const [forms] = await connection.query(`
+        SELECT 
+          f.id, f.uuid, f.title, f.description, f.form_type,
+          f.requires_login, f.show_progress_bar, f.shuffle_questions,
+          f.welcome_message, f.submit_message, f.time_limit_minutes,
+          f.available_from, f.available_until, f.is_active,
+          f.passing_score,
+          f.requires_odoo_validation
+        FROM forms f
+        WHERE f.uuid = ?
+      `, [uuid])
+
+      if (forms.length === 0) {
+        return reply.code(404).send({ 
+          ok: false, 
+          error: 'Formulario no encontrado' 
+        })
+      }
+
+      const form = forms[0]
+
+      // Verificar si está activo
+      if (!form.is_active) {
+        return reply.code(403).send({ 
+          ok: false, 
+          error: 'Este formulario no está disponible actualmente' 
+        })
+      }
+
+      // Verificar disponibilidad temporal
+      const now = new Date()
+      if (form.available_from && new Date(form.available_from) > now) {
+        return reply.code(403).send({ 
+          ok: false, 
+          error: 'Este formulario aún no está disponible' 
+        })
+      }
+      if (form.available_until && new Date(form.available_until) < now) {
+        return reply.code(403).send({ 
+          ok: false, 
+          error: 'Este formulario ya no está disponible' 
+        })
+      }
+
+      // Obtener preguntas con su tipo
+      const [questions] = await connection.query(`
+        SELECT 
+          q.id, q.question_text, q.help_text, q.placeholder,
+          q.is_required, q.display_order, q.config,
+          qt.code as type_code, qt.name as type_name, qt.has_options
+        FROM questions q
+        JOIN question_types qt ON q.question_type_id = qt.id
+        WHERE q.form_id = ? AND q.is_active = 1
+        ORDER BY q.display_order
+      `, [form.id])
+
+      // Obtener opciones para preguntas que las tienen
+      const questionIds = questions.map(q => q.id)
+      let options = []
+      
+      if (questionIds.length > 0) {
+        const [opts] = await connection.query(`
+          SELECT question_id, id, option_text, option_value, display_order
+          FROM question_options
+          WHERE question_id IN (?) AND is_active = 1
+          ORDER BY display_order
+        `, [questionIds])
+        options = opts
+      }
+
+      // Adjuntar opciones a cada pregunta
+      const questionsWithOptions = questions.map(q => ({
+        id: q.id,
+        question_text: q.question_text,
+        help_text: q.help_text,
+        placeholder: q.placeholder,
+        is_required: !!q.is_required,
+        display_order: q.display_order,
+        type: q.type_code,
+        type_code: q.type_code,
+        type_name: q.type_name,
+        has_options: !!q.has_options,
+        config: q.config ? JSON.parse(q.config) : null,
+        options: options
+          .filter(o => o.question_id === q.id)
+          .map(o => ({
+            id: o.id,
+            option_text: o.option_text,
+            option_value: o.option_value
+          }))
+      }))
+
+      return reply.send({
+        ok: true,
+        data: {
+          form: {
+            uuid: form.uuid,
+            title: form.title,
+            description: form.description,
+            form_type: form.form_type,
+            requires_login: !!form.requires_login,
+            show_progress_bar: !!form.show_progress_bar,
+            shuffle_questions: !!form.shuffle_questions,
+            welcome_message: form.welcome_message,
+            submit_message: form.submit_message,
+            time_limit_minutes: form.time_limit_minutes,
+            passing_score: form.passing_score,
+            requires_odoo_validation: !!form.requires_odoo_validation
+          },
+          questions: questionsWithOptions
+        }
+      })
+
+    } finally {
+      connection.release()
+    }
+  } catch (error) {
+    req.log.error(error)
+    return reply.code(500).send({ 
+      ok: false, 
+      error: 'Error al obtener formulario' 
+    })
+  }
+}
+}
+
+// ═══════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════
+function convertToCSV(data) {
+  if (!data.length) return ''
+  
+  // Headers
+  const headers = [
+    'ID Respuesta',
+    'Email',
+    'Nombre',
+    'Estado',
+    'Fecha Inicio',
+    'Fecha Envío',
+    'Tiempo (min)',
+    'Puntuación (%)',
+    'Aprobado',
+    'Pregunta',
+    'Respuesta'
+  ]
+  
+  // Agrupar por respuesta
+  const responseMap = {}
+  data.forEach(row => {
+    if (!responseMap[row.response_id]) {
+      responseMap[row.response_id] = {
+        base: {
+          response_id: row.response_id,
+          respondent_email: row.respondent_email || '',
+          respondent_name: row.respondent_name || '',
+          status: row.status,
+          started_at: row.started_at,
+          submitted_at: row.submitted_at,
+          completion_time_minutes: row.completion_time_minutes || '',
+          percentage_score: row.percentage_score || '',
+          passed: row.passed ? 'Sí' : 'No'
+        },
+        answers: []
+      }
+    }
+    
+    if (row.question_text) {
+      let answer = row.answer_text || ''
+      if (row.answer_number !== null) answer = row.answer_number
+      if (row.answer_date) answer = row.answer_date
+      if (row.selected_options) answer = JSON.parse(row.selected_options).join(', ')
+      
+      responseMap[row.response_id].answers.push({
+        question: row.question_text,
+        answer: answer
+      })
+    }
+  })
+  
+  // Construir filas CSV
+  const rows = [headers.join(',')]
+  
+  Object.values(responseMap).forEach(response => {
+    const base = response.base
+    response.answers.forEach((qa, index) => {
+      const row = [
+        base.response_id,
+        `"${base.respondent_email}"`,
+        `"${base.respondent_name}"`,
+        base.status,
+        formatDate(base.started_at),
+        formatDate(base.submitted_at),
+        base.completion_time_minutes,
+        base.percentage_score,
+        base.passed,
+        `"${qa.question}"`,
+        `"${qa.answer}"`
+      ]
+      rows.push(row.join(','))
+    })
+  })
+  
+  return rows.join('\n')
+}
+
+function formatDate(date) {
+  if (!date) return ''
+  return new Date(date).toLocaleString('es-PE')
+}
+
+
+

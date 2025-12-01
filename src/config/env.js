@@ -3,6 +3,7 @@ import 'dotenv/config'
 export const config = {
   port: parseInt(process.env.PORT || '3000', 10),
   nodeEnv: process.env.NODE_ENV || 'development',
+  isProduction: process.env.NODE_ENV === 'production',
   allowedOrigins: (process.env.ALLOWED_ORIGINS || '')
     .split(',')
     .map(s => s.trim())
@@ -32,6 +33,13 @@ export const config = {
     expiresIn: process.env.JWT_EXPIRES_IN || '1h',
     refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
   },
+
+  odoo: {
+    url: process.env.ODOO_URL || '',
+    db: process.env.ODOO_DB || '',
+    login: process.env.ODOO_LOGIN,
+    password: process.env.ODOO_PASSWORD,
+  },
   
   publicBaseUrl: process.env.PUBLIC_BASE_URL || 'http://127.0.0.1:3000',
 }
@@ -47,7 +55,9 @@ if (config.isProduction) {
   requiredEnvVars.push(
     ['gcp.projectId', config.gcp.projectId],
     ['gcp.credentialsPath', config.gcp.credentialsPath],
-    ['gcp.bucket', config.gcp.bucket]
+    ['gcp.bucket', config.gcp.bucket],
+    ['odoo.login', config.odoo.login],
+    ['odoo.password', config.odoo.password]
   )
 }
 
@@ -58,6 +68,6 @@ for (const [name, value] of requiredEnvVars) {
 }
 
 // JWT validacion de caracteres
-if (config.isProduction && config.jwt.secret.length < 32) {
+if (config.isProduction && config.jwt.secret && config.jwt.secret.length < 32) {
   throw new Error('JWT_SECRET debe tener al menos 32 caracteres en producción')
 }

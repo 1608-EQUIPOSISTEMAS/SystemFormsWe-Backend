@@ -1,18 +1,35 @@
+// src/routes/form.routes.js
 import { FormController } from '../controllers/form.controller.js'
 import { authenticate } from '../middlewares/auth.middleware.js'
 
 export default async function formRoutes(fastify) {
-  // Todas requieren autenticación
-  fastify.addHook('preHandler', authenticate)
+  // ═══════════════════════════════════════
+  // RUTAS PÚBLICAS (sin autenticación)
+  // ═══════════════════════════════════════
+  fastify.get('/public/:uuid', FormController.getPublicForm)
 
-  // Tipos de preguntas (catálogo)
-  fastify.get('/question-types', FormController.getQuestionTypes)
+  // ═══════════════════════════════════════
+  // RUTAS PROTEGIDAS (requieren autenticación)
+  // ═══════════════════════════════════════
+  fastify.register(async (protectedRoutes) => {
+    protectedRoutes.addHook('preHandler', authenticate)
 
-  // CRUD de formularios
-  fastify.post('/', FormController.create)
-  fastify.get('/', FormController.list)
-  fastify.get('/:uuid', FormController.getByUuid)
-  fastify.put('/:uuid', FormController.update)
-  fastify.delete('/:uuid', FormController.delete)
-  fastify.post('/:uuid/duplicate', FormController.duplicate)
+    // Tipos de preguntas (catálogo)
+    protectedRoutes.get('/question-types', FormController.getQuestionTypes)
+
+    // CRUD de formularios
+    protectedRoutes.post('/', FormController.create)
+    protectedRoutes.get('/', FormController.list)
+    protectedRoutes.get('/:uuid', FormController.getByUuid)
+    protectedRoutes.put('/:uuid', FormController.update)
+    protectedRoutes.delete('/:uuid', FormController.delete)
+    protectedRoutes.post('/:uuid/duplicate', FormController.duplicate)
+
+    // ✅ Estadísticas del formulario
+    protectedRoutes.get('/:uuid/stats', FormController.getStats)
+
+    // ✅ Respuestas del formulario
+    protectedRoutes.get('/:uuid/responses', FormController.getResponses)
+    protectedRoutes.get('/:uuid/responses/export', FormController.exportResponses)
+  })
 }
