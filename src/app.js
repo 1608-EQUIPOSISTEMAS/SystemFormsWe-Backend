@@ -7,8 +7,12 @@ import routes from './routes/index.js'
 const app = Fastify({ 
   logger: { 
     transport: { target: 'pino-pretty' } 
-  } 
+  },
+  // ★ Aumentar límite del body a 50MB para imágenes base64
+  bodyLimit: 50 * 1024 * 1024
 })
+
+
 
 // Middlewares
 await app.register(helmet)

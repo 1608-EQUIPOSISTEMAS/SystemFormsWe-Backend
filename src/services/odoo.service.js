@@ -231,6 +231,36 @@ class OdooService {
     }
   }
 
+  async getCertificatePdfBase64(certificateId) {
+  try {
+    const result = await this.call('issued.certificates', 'search_read', [], {
+      domain: [['id', '=', certificateId]],
+      fields: ['pdf_certificate_file']
+    })
+
+    if (!result.ok || !result.result || result.result.length === 0) {
+      console.error('❌ No se encontró el certificado:', certificateId)
+      return null
+    }
+
+    const pdfField = result.result[0].pdf_certificate_file
+
+    // Verificar si tiene contenido válido
+    if (!pdfField || pdfField === 'false' || typeof pdfField !== 'string') {
+      console.error('❌ El certificado no tiene PDF generado')
+      return null
+    }
+
+    // El campo pdf_certificate_file contiene el PDF en base64
+    console.log('✅ PDF base64 obtenido, longitud:', pdfField.length)
+    return pdfField
+
+  } catch (error) {
+    console.error('❌ Error obteniendo PDF de Odoo:', error)
+    return null
+  }
+}
+
   // ═══════════════════════════════════════
   // PROCESO COMPLETO DE CERTIFICACIÓN
   // ═══════════════════════════════════════
