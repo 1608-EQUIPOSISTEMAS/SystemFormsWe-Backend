@@ -607,7 +607,6 @@ static async getStats(req, reply) {
     try {
       const connection = await pool.getConnection()
       try {
-        // Verificar que el formulario pertenece al usuario
         const [forms] = await connection.query(
           'SELECT id, form_type FROM forms WHERE uuid = ? AND created_by = ?',
           [uuid, userId]
@@ -623,15 +622,16 @@ static async getStats(req, reply) {
         const formId = forms[0].id
         const isExam = forms[0].form_type === 'EXAM'
 
-        // Estadísticas básicas
+        // Estadísticas básicas + certificados
         const [stats] = await connection.query(`
           SELECT 
             COUNT(*) as total_responses,
             COUNT(CASE WHEN status = 'SUBMITTED' THEN 1 END) as completed,
             COUNT(CASE WHEN status = 'IN_PROGRESS' THEN 1 END) as in_progress,
-            AVG(CASE WHEN status = 'SUBMITTED' THEN percentage_score END) as avg_score,
+            AVG(CASE WHEN status = 'SUBMITTED' AND percentage_score IS NOT NULL THEN percentage_score END) as avg_score,
             MIN(submitted_at) as first_response,
-            MAX(submitted_at) as last_response
+            MAX(submitted_at) as last_response,
+            COUNT(CASE WHEN odoo_certificate_pdf IS NOT NULL AND odoo_certificate_pdf != '' THEN 1 END) as certified
           FROM form_responses
           WHERE form_id = ?
         `, [formId])
@@ -649,7 +649,6 @@ static async getStats(req, reply) {
           ORDER BY date DESC
         `, [formId])
 
-        // Si es examen, estadísticas adicionales
         let examStats = null
         if (isExam) {
           const [exam] = await connection.query(`
@@ -657,7 +656,7 @@ static async getStats(req, reply) {
               COUNT(CASE WHEN passed = 1 THEN 1 END) as passed,
               COUNT(CASE WHEN passed = 0 THEN 1 END) as failed,
               MAX(percentage_score) as highest_score,
-              MIN(percentage_score) as lowest_score
+              MIN(CASE WHEN percentage_score > 0 THEN percentage_score END) as lowest_score
             FROM form_responses
             WHERE form_id = ? AND status = 'SUBMITTED'
           `, [formId])
@@ -670,9 +669,10 @@ static async getStats(req, reply) {
             total: stats[0].total_responses || 0,
             completed: stats[0].completed || 0,
             inProgress: stats[0].in_progress || 0,
-            avgScore: stats[0].avg_score ? Math.round(stats[0].avg_score) : null,
+            avgScore: stats[0].avg_score ? Math.round(stats[0].avg_score) : 0,
             firstResponse: stats[0].first_response,
             lastResponse: stats[0].last_response,
+            certified: stats[0].certified || 0,
             dailyResponses: daily,
             ...(examStats && { 
               passed: examStats.passed || 0,
@@ -694,7 +694,6 @@ static async getStats(req, reply) {
       })
     }
   }
-
 
 // ═══════════════════════════════════════
 // OBTENER RESPUESTAS
@@ -732,9 +731,14 @@ static async getResponses(req, reply) {
         }
 
         if (search) {
-          whereClause += ' AND (u.email LIKE ? OR u.first_name LIKE ? OR u.last_name LIKE ?)'
+          whereClause += ` AND (
+            fr.respondent_email LIKE ? 
+            OR fr.odoo_student_names LIKE ? 
+            OR fr.odoo_student_surnames LIKE ?
+            OR u.email LIKE ?
+          )`
           const searchTerm = `%${search}%`
-          params.push(searchTerm, searchTerm, searchTerm)
+          params.push(searchTerm, searchTerm, searchTerm, searchTerm)
         }
 
         // Contar total
@@ -745,13 +749,27 @@ static async getResponses(req, reply) {
           ${whereClause}
         `, params)
 
-        // Obtener respuestas
+        // Obtener respuestas - USANDO CAMPOS DE ODOO
         const [responses] = await connection.query(`
           SELECT 
-            fr.id, fr.uuid, fr.status, fr.started_at, fr.submitted_at,
-            fr.total_score, fr.percentage_score, fr.passed,
-            u.email as respondent_email,
-            CONCAT(u.first_name, ' ', u.last_name) as respondent_name,
+            fr.id, 
+            fr.response_uuid,
+            fr.status, 
+            fr.started_at, 
+            fr.submitted_at,
+            fr.total_score, 
+            fr.max_possible_score,
+            fr.percentage_score, 
+            fr.passed,
+            fr.odoo_certificate_pdf,
+            fr.odoo_certificate_id,
+            -- Prioridad: datos de Odoo > datos de user > email directo
+            COALESCE(
+              NULLIF(CONCAT_WS(' ', fr.odoo_student_names, fr.odoo_student_surnames), ''),
+              CONCAT_WS(' ', u.first_name, u.last_name),
+              'Anónimo'
+            ) as respondent_name,
+            COALESCE(fr.respondent_email, u.email) as respondent_email,
             TIMESTAMPDIFF(MINUTE, fr.started_at, fr.submitted_at) as duration_minutes
           FROM form_responses fr
           LEFT JOIN users u ON fr.user_id = u.id
