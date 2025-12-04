@@ -1,6 +1,19 @@
 import { pool } from '../config/database.js'
 import { v4 as uuidv4 } from 'uuid'
 
+// ═══════════════════════════════════════
+// HELPER: PARSEO SEGURO DE JSON
+// ═══════════════════════════════════════
+function safeJsonParse(value) {
+  if (!value) return null
+  if (typeof value === 'object') return value // Ya es objeto
+  try {
+    return JSON.parse(value)
+  } catch {
+    return null
+  }
+}
+
 export class FormController {
 
   // ═══════════════════════════════════════
@@ -27,133 +40,126 @@ export class FormController {
   }
 
   static async duplicate(req, reply) {
-  const { uuid } = req.params
-  const userId = req.user?.id
-  
-  const connection = await pool.getConnection()
-  
-  try {
-    await connection.beginTransaction()
+    const { uuid } = req.params
+    const userId = req.user?.id
     
-    // Obtener formulario original
-    const [forms] = await connection.query(
-      'SELECT * FROM forms WHERE uuid = ?',
-      [uuid]
-    )
+    const connection = await pool.getConnection()
     
-    if (!forms.length) {
-      await connection.rollback()
-      return reply.code(404).send({ ok: false, error: 'Formulario no encontrado' })
-    }
-    
-    const originalForm = forms[0]
-    const newUuid = uuidv4()
-    
-    // Crear copia del formulario
-    const [formResult] = await connection.query(`
-      INSERT INTO forms (
-        uuid, title, description, form_type, course_id,
-        is_active, is_public, requires_login,
-        allow_multiple_responses, show_progress_bar,
-        shuffle_questions, passing_score,
-        show_score_after_submit, show_correct_answers,
-        welcome_message, submit_message, created_by
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `, [
-      newUuid,
-      `${originalForm.title} (copia)`,
-      originalForm.description,
-      originalForm.form_type,
-      originalForm.course_id,
-      0, // inactivo por defecto
-      originalForm.is_public,
-      originalForm.requires_login,
-      originalForm.allow_multiple_responses,
-      originalForm.show_progress_bar,
-      originalForm.shuffle_questions,
-      originalForm.passing_score,
-      originalForm.show_score_after_submit,
-      originalForm.show_correct_answers,
-      originalForm.welcome_message,
-      originalForm.submit_message,
-      userId
-    ])
-    
-    const newFormId = formResult.insertId
-    
-    // Copiar preguntas
-    const [questions] = await connection.query(
-      'SELECT * FROM questions WHERE form_id = ? ORDER BY display_order',
-      [originalForm.id]
-    )
-    
-    for (const question of questions) {
-      const [qResult] = await connection.query(`
-        INSERT INTO questions (
-          form_id, section_id, question_type_id,
-          question_text, help_text, placeholder,
-          is_required, display_order, is_active,
-          validation_rules, config, points
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `, [
-        newFormId,
-        question.section_id,
-        question.question_type_id,
-        question.question_text,
-        question.help_text,
-        question.placeholder,
-        question.is_required,
-        question.display_order,
-        question.is_active,
-        question.validation_rules,
-        question.config,
-        question.points
-      ])
+    try {
+      await connection.beginTransaction()
       
-      // Copiar opciones
-      const [options] = await connection.query(
-        'SELECT * FROM question_options WHERE question_id = ? ORDER BY display_order',
-        [question.id]
+      const [forms] = await connection.query(
+        'SELECT * FROM forms WHERE uuid = ?',
+        [uuid]
       )
       
-      for (const option of options) {
-        await connection.query(`
-          INSERT INTO question_options (
-            question_id, option_text, option_value,
-            display_order, is_correct, points
-          ) VALUES (?, ?, ?, ?, ?, ?)
+      if (!forms.length) {
+        await connection.rollback()
+        return reply.code(404).send({ ok: false, error: 'Formulario no encontrado' })
+      }
+      
+      const originalForm = forms[0]
+      const newUuid = uuidv4()
+      
+      const [formResult] = await connection.query(`
+        INSERT INTO forms (
+          uuid, title, description, form_type, course_id,
+          is_active, is_public, requires_login,
+          allow_multiple_responses, show_progress_bar,
+          shuffle_questions, passing_score,
+          show_score_after_submit, show_correct_answers,
+          welcome_message, submit_message, created_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+        newUuid,
+        `${originalForm.title} (copia)`,
+        originalForm.description,
+        originalForm.form_type,
+        originalForm.course_id,
+        0,
+        originalForm.is_public,
+        originalForm.requires_login,
+        originalForm.allow_multiple_responses,
+        originalForm.show_progress_bar,
+        originalForm.shuffle_questions,
+        originalForm.passing_score,
+        originalForm.show_score_after_submit,
+        originalForm.show_correct_answers,
+        originalForm.welcome_message,
+        originalForm.submit_message,
+        userId
+      ])
+      
+      const newFormId = formResult.insertId
+      
+      const [questions] = await connection.query(
+        'SELECT * FROM questions WHERE form_id = ? ORDER BY display_order',
+        [originalForm.id]
+      )
+      
+      for (const question of questions) {
+        const [qResult] = await connection.query(`
+          INSERT INTO questions (
+            form_id, section_id, question_type_id,
+            question_text, help_text, placeholder,
+            is_required, display_order, is_active,
+            validation_rules, config, points
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `, [
-          qResult.insertId,
-          option.option_text,
-          option.option_value,
-          option.display_order,
-          option.is_correct,
-          option.points
+          newFormId,
+          question.section_id,
+          question.question_type_id,
+          question.question_text,
+          question.help_text,
+          question.placeholder,
+          question.is_required,
+          question.display_order,
+          question.is_active,
+          question.validation_rules,
+          question.config,
+          question.points
         ])
+        
+        const [options] = await connection.query(
+          'SELECT * FROM question_options WHERE question_id = ? ORDER BY display_order',
+          [question.id]
+        )
+        
+        for (const option of options) {
+          await connection.query(`
+            INSERT INTO question_options (
+              question_id, option_text, option_value,
+              display_order, is_correct, points
+            ) VALUES (?, ?, ?, ?, ?, ?)
+          `, [
+            qResult.insertId,
+            option.option_text,
+            option.option_value,
+            option.display_order,
+            option.is_correct,
+            option.points
+          ])
+        }
       }
+      
+      await connection.commit()
+      
+      return reply.send({
+        ok: true,
+        data: {
+          uuid: newUuid,
+          message: 'Formulario duplicado exitosamente'
+        }
+      })
+      
+    } catch (error) {
+      await connection.rollback()
+      req.log.error(error)
+      return reply.code(500).send({ ok: false, error: 'Error al duplicar formulario' })
+    } finally {
+      connection.release()
     }
-    
-    await connection.commit()
-    
-    return reply.send({
-      ok: true,
-      data: {
-        uuid: newUuid,
-        message: 'Formulario duplicado exitosamente'
-      }
-    })
-    
-  } catch (error) {
-    await connection.rollback()
-    req.log.error(error)
-    return reply.code(500).send({ 
-      ok: false, 
-      error: 'Error al duplicar formulario' 
-    })
-  } finally {
-    connection.release()
   }
-}
 
   // ═══════════════════════════════════════
   // CREAR FORMULARIO
@@ -181,7 +187,6 @@ export class FormController {
       questions = []
     } = req.body
 
-    // Validaciones básicas
     if (!title || title.trim().length === 0) {
       return reply.code(400).send({ ok: false, error: 'El título es requerido' })
     }
@@ -195,7 +200,6 @@ export class FormController {
     try {
       await connection.beginTransaction()
 
-      // 1. Crear el formulario
       const formUuid = uuidv4()
       const [formResult] = await connection.query(`
         INSERT INTO forms (
@@ -217,8 +221,7 @@ export class FormController {
 
       const formId = formResult.insertId
 
-      // 2. Crear secciones si existen
-      const sectionMap = new Map() // Para mapear índices temporales a IDs reales
+      const sectionMap = new Map()
       
       if (sections && sections.length > 0) {
         for (let i = 0; i < sections.length; i++) {
@@ -232,12 +235,10 @@ export class FormController {
         }
       }
 
-      // 3. Crear preguntas
       if (questions && questions.length > 0) {
         for (let i = 0; i < questions.length; i++) {
           const q = questions[i]
           
-          // Resolver section_id si viene referenciado
           let sectionId = null
           if (q.section_temp_id !== undefined && sectionMap.has(q.section_temp_id)) {
             sectionId = sectionMap.get(q.section_temp_id)
@@ -267,7 +268,6 @@ export class FormController {
 
           const questionId = questionResult.insertId
 
-          // 4. Crear opciones si la pregunta las tiene
           if (q.options && q.options.length > 0) {
             for (let j = 0; j < q.options.length; j++) {
               const opt = q.options[j]
@@ -294,10 +294,7 @@ export class FormController {
       return reply.code(201).send({
         ok: true,
         message: 'Formulario creado exitosamente',
-        data: {
-          id: formId,
-          uuid: formUuid
-        }
+        data: { id: formId, uuid: formUuid }
       })
 
     } catch (error) {
@@ -334,12 +331,10 @@ export class FormController {
           params.push(form_type)
         }
 
-        // Contar total
         const [countResult] = await connection.query(`
           SELECT COUNT(*) as total FROM forms f ${whereClause}
         `, params)
 
-        // Obtener formularios
         const [forms] = await connection.query(`
           SELECT 
             f.id, f.uuid, f.title, f.description, f.form_type,
@@ -386,7 +381,6 @@ export class FormController {
     try {
       const connection = await pool.getConnection()
       try {
-        // Obtener formulario
         const [forms] = await connection.query(`
           SELECT f.*, c.name as course_name
           FROM forms f
@@ -400,7 +394,6 @@ export class FormController {
 
         const form = forms[0]
 
-        // Obtener secciones
         const [sections] = await connection.query(`
           SELECT id, title, description, display_order
           FROM form_sections
@@ -408,7 +401,6 @@ export class FormController {
           ORDER BY display_order
         `, [form.id])
 
-        // Obtener preguntas con tipo
         const [questions] = await connection.query(`
           SELECT 
             q.id, q.section_id, q.question_type_id, q.question_text,
@@ -421,7 +413,6 @@ export class FormController {
           ORDER BY q.section_id, q.display_order
         `, [form.id])
 
-        // Obtener opciones para cada pregunta
         const questionIds = questions.map(q => q.id)
         let options = []
         
@@ -435,28 +426,23 @@ export class FormController {
           options = opts
         }
 
-        // Agrupar opciones por pregunta
         const optionsByQuestion = options.reduce((acc, opt) => {
           if (!acc[opt.question_id]) acc[opt.question_id] = []
           acc[opt.question_id].push(opt)
           return acc
         }, {})
 
-        // Adjuntar opciones a preguntas
+        // ✅ CORREGIDO: Usar safeJsonParse
         const questionsWithOptions = questions.map(q => ({
           ...q,
-          validation_rules: q.validation_rules ? JSON.parse(q.validation_rules) : null,
-          config: q.config ? JSON.parse(q.config) : null,
+          validation_rules: safeJsonParse(q.validation_rules),
+          config: safeJsonParse(q.config),
           options: optionsByQuestion[q.id] || []
         }))
 
         return reply.send({
           ok: true,
-          data: {
-            form,
-            sections,
-            questions: questionsWithOptions
-          }
+          data: { form, sections, questions: questionsWithOptions }
         })
       } finally {
         connection.release()
@@ -478,7 +464,6 @@ export class FormController {
     try {
       const connection = await pool.getConnection()
       try {
-        // Verificar que existe y pertenece al usuario
         const [existing] = await connection.query(
           'SELECT id FROM forms WHERE uuid = ? AND created_by = ?',
           [uuid, userId]
@@ -490,7 +475,6 @@ export class FormController {
 
         const formId = existing[0].id
 
-        // Campos permitidos para actualizar
         const allowedFields = [
           'title', 'description', 'is_active', 'is_public', 'requires_login',
           'available_from', 'available_until', 'time_limit_minutes',
@@ -556,51 +540,43 @@ export class FormController {
     }
   }
 
+  // ═══════════════════════════════════════
+  // TOGGLE ACTIVO/INACTIVO
+  // ═══════════════════════════════════════
+  static async toggleActive(req, reply) {
+    const { uuid } = req.params
+    const userId = req.user?.id
+    
+    const connection = await pool.getConnection()
+    
+    try {
+      const [forms] = await connection.query(
+        'SELECT id, is_active FROM forms WHERE uuid = ? AND created_by = ?',
+        [uuid, userId]
+      )
+      
+      if (!forms.length) {
+        return reply.code(404).send({ ok: false, error: 'Formulario no encontrado' })
+      }
+      
+      const form = forms[0]
+      const newStatus = !form.is_active
+      
+      await connection.query(
+        'UPDATE forms SET is_active = ?, updated_at = NOW() WHERE id = ?',
+        [newStatus ? 1 : 0, form.id]
+      )
+      
+      return reply.send({ ok: true, data: { is_active: newStatus } })
+    } finally {
+      connection.release()
+    }
+  }
 
   // ═══════════════════════════════════════
-// TOGGLE ACTIVO/INACTIVO
-// ═══════════════════════════════════════
-static async toggleActive(req, reply) {
-  const { uuid } = req.params
-  const userId = req.user?.id
-  
-  const connection = await pool.getConnection()
-  
-  try {
-    // Obtener estado actual
-    const [forms] = await connection.query(
-      'SELECT id, is_active FROM forms WHERE uuid = ? AND created_by = ?',
-      [uuid, userId]
-    )
-    
-    if (!forms.length) {
-      return reply.code(404).send({ ok: false, error: 'Formulario no encontrado' })
-    }
-    
-    const form = forms[0]
-    const newStatus = !form.is_active
-    
-    // Actualizar estado
-    await connection.query(
-      'UPDATE forms SET is_active = ?, updated_at = NOW() WHERE id = ?',
-      [newStatus ? 1 : 0, form.id]
-    )
-    
-    return reply.send({ 
-      ok: true, 
-      data: { 
-        is_active: newStatus 
-      } 
-    })
-  } finally {
-    connection.release()
-  }
-}
-
-// ═══════════════════════════════════════
-// OBTENER ESTADÍSTICAS
-// ═══════════════════════════════════════
-static async getStats(req, reply) {
+  // OBTENER ESTADÍSTICAS
+  // ═══════════════════════════════════════
+  static async getStats(req, reply) {
     const { uuid } = req.params
     const userId = req.user?.id
 
@@ -613,22 +589,18 @@ static async getStats(req, reply) {
         )
 
         if (forms.length === 0) {
-          return reply.code(404).send({ 
-            ok: false, 
-            error: 'Formulario no encontrado' 
-          })
+          return reply.code(404).send({ ok: false, error: 'Formulario no encontrado' })
         }
 
         const formId = forms[0].id
         const isExam = forms[0].form_type === 'EXAM'
 
-        // Estadísticas básicas + certificados
         const [stats] = await connection.query(`
           SELECT 
             COUNT(*) as total_responses,
             COUNT(CASE WHEN status = 'SUBMITTED' THEN 1 END) as completed,
             COUNT(CASE WHEN status = 'IN_PROGRESS' THEN 1 END) as in_progress,
-            AVG(CASE WHEN status = 'SUBMITTED' AND percentage_score IS NOT NULL THEN percentage_score END) as avg_score,
+            AVG(CASE WHEN status = 'SUBMITTED' THEN percentage_score END) as avg_score,
             MIN(submitted_at) as first_response,
             MAX(submitted_at) as last_response,
             COUNT(CASE WHEN odoo_certificate_pdf IS NOT NULL AND odoo_certificate_pdf != '' THEN 1 END) as certified
@@ -636,18 +608,7 @@ static async getStats(req, reply) {
           WHERE form_id = ?
         `, [formId])
 
-        // Respuestas por día (últimos 7 días)
-        const [daily] = await connection.query(`
-          SELECT 
-            DATE(submitted_at) as date,
-            COUNT(*) as count
-          FROM form_responses
-          WHERE form_id = ? 
-            AND submitted_at >= DATE_SUB(CURDATE(), INTERVAL 7 DAY)
-            AND status = 'SUBMITTED'
-          GROUP BY DATE(submitted_at)
-          ORDER BY date DESC
-        `, [formId])
+        const daily = []
 
         let examStats = null
         if (isExam) {
@@ -656,7 +617,7 @@ static async getStats(req, reply) {
               COUNT(CASE WHEN passed = 1 THEN 1 END) as passed,
               COUNT(CASE WHEN passed = 0 THEN 1 END) as failed,
               MAX(percentage_score) as highest_score,
-              MIN(CASE WHEN percentage_score > 0 THEN percentage_score END) as lowest_score
+              MIN(percentage_score) as lowest_score
             FROM form_responses
             WHERE form_id = ? AND status = 'SUBMITTED'
           `, [formId])
@@ -669,7 +630,7 @@ static async getStats(req, reply) {
             total: stats[0].total_responses || 0,
             completed: stats[0].completed || 0,
             inProgress: stats[0].in_progress || 0,
-            avgScore: stats[0].avg_score ? Math.round(stats[0].avg_score) : 0,
+            avgScore: stats[0].avg_score ? Math.round(stats[0].avg_score) : null,
             firstResponse: stats[0].first_response,
             lastResponse: stats[0].last_response,
             certified: stats[0].certified || 0,
@@ -688,17 +649,14 @@ static async getStats(req, reply) {
       }
     } catch (error) {
       req.log.error(error)
-      return reply.code(500).send({ 
-        ok: false, 
-        error: 'Error al obtener estadísticas' 
-      })
+      return reply.code(500).send({ ok: false, error: 'Error al obtener estadísticas' })
     }
   }
 
-// ═══════════════════════════════════════
-// OBTENER RESPUESTAS
-// ═══════════════════════════════════════
-static async getResponses(req, reply) {
+  // ═══════════════════════════════════════
+  // OBTENER RESPUESTAS
+  // ═══════════════════════════════════════
+  static async getResponses(req, reply) {
     const { uuid } = req.params
     const userId = req.user?.id
     const { page = 1, limit = 20, status, search } = req.query
@@ -706,17 +664,13 @@ static async getResponses(req, reply) {
     try {
       const connection = await pool.getConnection()
       try {
-        // Verificar formulario
         const [forms] = await connection.query(
           'SELECT id FROM forms WHERE uuid = ? AND created_by = ?',
           [uuid, userId]
         )
 
         if (forms.length === 0) {
-          return reply.code(404).send({ 
-            ok: false, 
-            error: 'Formulario no encontrado' 
-          })
+          return reply.code(404).send({ ok: false, error: 'Formulario no encontrado' })
         }
 
         const formId = forms[0].id
@@ -741,7 +695,6 @@ static async getResponses(req, reply) {
           params.push(searchTerm, searchTerm, searchTerm, searchTerm)
         }
 
-        // Contar total
         const [countResult] = await connection.query(`
           SELECT COUNT(*) as total 
           FROM form_responses fr
@@ -749,7 +702,6 @@ static async getResponses(req, reply) {
           ${whereClause}
         `, params)
 
-        // Obtener respuestas - USANDO CAMPOS DE ODOO
         const [responses] = await connection.query(`
           SELECT 
             fr.id, 
@@ -763,7 +715,6 @@ static async getResponses(req, reply) {
             fr.passed,
             fr.odoo_certificate_pdf,
             fr.odoo_certificate_id,
-            -- Prioridad: datos de Odoo > datos de user > email directo
             COALESCE(
               NULLIF(CONCAT_WS(' ', fr.odoo_student_names, fr.odoo_student_surnames), ''),
               CONCAT_WS(' ', u.first_name, u.last_name),
@@ -796,40 +747,32 @@ static async getResponses(req, reply) {
       }
     } catch (error) {
       req.log.error(error)
-      return reply.code(500).send({ 
-        ok: false, 
-        error: 'Error al obtener respuestas' 
-      })
+      return reply.code(500).send({ ok: false, error: 'Error al obtener respuestas' })
     }
   }
 
-// ═══════════════════════════════════════
-// EXPORTAR RESPUESTAS
-// ═══════════════════════════════════════
-static async exportResponses(req, reply) {
+  // ═══════════════════════════════════════
+  // EXPORTAR RESPUESTAS
+  // ═══════════════════════════════════════
+  static async exportResponses(req, reply) {
     const { uuid } = req.params
     const userId = req.user?.id
 
     try {
       const connection = await pool.getConnection()
       try {
-        // Verificar formulario
         const [forms] = await connection.query(
           'SELECT id, title FROM forms WHERE uuid = ? AND created_by = ?',
           [uuid, userId]
         )
 
         if (forms.length === 0) {
-          return reply.code(404).send({ 
-            ok: false, 
-            error: 'Formulario no encontrado' 
-          })
+          return reply.code(404).send({ ok: false, error: 'Formulario no encontrado' })
         }
 
         const formId = forms[0].id
         const formTitle = forms[0].title
 
-        // Obtener preguntas
         const [questions] = await connection.query(`
           SELECT id, question_text, display_order
           FROM questions
@@ -837,7 +780,6 @@ static async exportResponses(req, reply) {
           ORDER BY display_order
         `, [formId])
 
-        // Obtener respuestas con detalle
         const [responses] = await connection.query(`
           SELECT 
             fr.id, fr.submitted_at, fr.total_score, fr.percentage_score,
@@ -848,7 +790,6 @@ static async exportResponses(req, reply) {
           ORDER BY fr.submitted_at DESC
         `, [formId])
 
-        // Obtener todas las respuestas individuales
         const responseIds = responses.map(r => r.id)
         let answers = []
         
@@ -861,7 +802,6 @@ static async exportResponses(req, reply) {
           answers = ans
         }
 
-        // Construir CSV
         const headers = ['Fecha', 'Email', 'Nombre', 'Puntuación']
         questions.forEach(q => headers.push(q.question_text))
 
@@ -883,7 +823,6 @@ static async exportResponses(req, reply) {
           return row
         })
 
-        // Generar CSV
         const csvContent = [
           headers.map(h => `"${h.replace(/"/g, '""')}"`).join(','),
           ...rows.map(row => 
@@ -904,147 +843,124 @@ static async exportResponses(req, reply) {
       }
     } catch (error) {
       req.log.error(error)
-      return reply.code(500).send({ 
-        ok: false, 
-        error: 'Error al exportar respuestas' 
-      })
+      return reply.code(500).send({ ok: false, error: 'Error al exportar respuestas' })
     }
   }
 
-// ═══════════════════════════════════════
-// OBTENER FORMULARIO PÚBLICO (sin auth)
-// ═══════════════════════════════════════
-static async getPublicForm(req, reply) {
-  const { uuid } = req.params
+  // ═══════════════════════════════════════
+  // OBTENER FORMULARIO PÚBLICO (sin auth)
+  // ═══════════════════════════════════════
+  static async getPublicForm(req, reply) {
+    const { uuid } = req.params
 
-  try {
-    const connection = await pool.getConnection()
     try {
-      // Obtener formulario activo
-      const [forms] = await connection.query(`
-        SELECT 
-          f.id, f.uuid, f.title, f.description, f.form_type,
-          f.requires_login, f.show_progress_bar, f.shuffle_questions,
-          f.welcome_message, f.submit_message, f.time_limit_minutes,
-          f.available_from, f.available_until, f.is_active,
-          f.passing_score,
-          f.requires_odoo_validation
-        FROM forms f
-        WHERE f.uuid = ?
-      `, [uuid])
+      const connection = await pool.getConnection()
+      try {
+        const [forms] = await connection.query(`
+          SELECT 
+            f.id, f.uuid, f.title, f.description, f.form_type,
+            f.requires_login, f.show_progress_bar, f.shuffle_questions,
+            f.welcome_message, f.submit_message, f.time_limit_minutes,
+            f.available_from, f.available_until, f.is_active,
+            f.passing_score,
+            f.requires_odoo_validation
+          FROM forms f
+          WHERE f.uuid = ?
+        `, [uuid])
 
-      if (forms.length === 0) {
-        return reply.code(404).send({ 
-          ok: false, 
-          error: 'Formulario no encontrado' 
-        })
-      }
-
-      const form = forms[0]
-
-      // Verificar si está activo
-      if (!form.is_active) {
-        return reply.code(403).send({ 
-          ok: false, 
-          error: 'Este formulario no está disponible actualmente' 
-        })
-      }
-
-      // Verificar disponibilidad temporal
-      const now = new Date()
-      if (form.available_from && new Date(form.available_from) > now) {
-        return reply.code(403).send({ 
-          ok: false, 
-          error: 'Este formulario aún no está disponible' 
-        })
-      }
-      if (form.available_until && new Date(form.available_until) < now) {
-        return reply.code(403).send({ 
-          ok: false, 
-          error: 'Este formulario ya no está disponible' 
-        })
-      }
-
-      // Obtener preguntas con su tipo
-      const [questions] = await connection.query(`
-        SELECT 
-          q.id, q.question_text, q.help_text, q.placeholder,
-          q.is_required, q.display_order, q.config,
-          qt.code as type_code, qt.name as type_name, qt.has_options
-        FROM questions q
-        JOIN question_types qt ON q.question_type_id = qt.id
-        WHERE q.form_id = ? AND q.is_active = 1
-        ORDER BY q.display_order
-      `, [form.id])
-
-      // Obtener opciones para preguntas que las tienen
-      const questionIds = questions.map(q => q.id)
-      let options = []
-      
-      if (questionIds.length > 0) {
-        const [opts] = await connection.query(`
-          SELECT question_id, id, option_text, option_value, display_order
-          FROM question_options
-          WHERE question_id IN (?) AND is_active = 1
-          ORDER BY display_order
-        `, [questionIds])
-        options = opts
-      }
-
-      // Adjuntar opciones a cada pregunta
-      const questionsWithOptions = questions.map(q => ({
-        id: q.id,
-        question_text: q.question_text,
-        help_text: q.help_text,
-        placeholder: q.placeholder,
-        is_required: !!q.is_required,
-        display_order: q.display_order,
-        type: q.type_code,
-        type_code: q.type_code,
-        type_name: q.type_name,
-        has_options: !!q.has_options,
-        config: q.config ? JSON.parse(q.config) : null,
-        options: options
-          .filter(o => o.question_id === q.id)
-          .map(o => ({
-            id: o.id,
-            option_text: o.option_text,
-            option_value: o.option_value
-          }))
-      }))
-
-      return reply.send({
-        ok: true,
-        data: {
-          form: {
-            uuid: form.uuid,
-            title: form.title,
-            description: form.description,
-            form_type: form.form_type,
-            requires_login: !!form.requires_login,
-            show_progress_bar: !!form.show_progress_bar,
-            shuffle_questions: !!form.shuffle_questions,
-            welcome_message: form.welcome_message,
-            submit_message: form.submit_message,
-            time_limit_minutes: form.time_limit_minutes,
-            passing_score: form.passing_score,
-            requires_odoo_validation: !!form.requires_odoo_validation
-          },
-          questions: questionsWithOptions
+        if (forms.length === 0) {
+          return reply.code(404).send({ ok: false, error: 'Formulario no encontrado' })
         }
-      })
 
-    } finally {
-      connection.release()
+        const form = forms[0]
+
+        if (!form.is_active) {
+          return reply.code(403).send({ ok: false, error: 'Este formulario no está disponible actualmente' })
+        }
+
+        const now = new Date()
+        if (form.available_from && new Date(form.available_from) > now) {
+          return reply.code(403).send({ ok: false, error: 'Este formulario aún no está disponible' })
+        }
+        if (form.available_until && new Date(form.available_until) < now) {
+          return reply.code(403).send({ ok: false, error: 'Este formulario ya no está disponible' })
+        }
+
+        const [questions] = await connection.query(`
+          SELECT 
+            q.id, q.question_text, q.help_text, q.placeholder,
+            q.is_required, q.display_order, q.config,
+            qt.code as type_code, qt.name as type_name, qt.has_options
+          FROM questions q
+          JOIN question_types qt ON q.question_type_id = qt.id
+          WHERE q.form_id = ? AND q.is_active = 1
+          ORDER BY q.display_order
+        `, [form.id])
+
+        const questionIds = questions.map(q => q.id)
+        let options = []
+        
+        if (questionIds.length > 0) {
+          const [opts] = await connection.query(`
+            SELECT question_id, id, option_text, option_value, display_order
+            FROM question_options
+            WHERE question_id IN (?) AND is_active = 1
+            ORDER BY display_order
+          `, [questionIds])
+          options = opts
+        }
+
+        // ✅ CORREGIDO: Usar safeJsonParse
+        const questionsWithOptions = questions.map(q => ({
+          id: q.id,
+          question_text: q.question_text,
+          help_text: q.help_text,
+          placeholder: q.placeholder,
+          is_required: !!q.is_required,
+          display_order: q.display_order,
+          type: q.type_code,
+          type_code: q.type_code,
+          type_name: q.type_name,
+          has_options: !!q.has_options,
+          config: safeJsonParse(q.config),
+          options: options
+            .filter(o => o.question_id === q.id)
+            .map(o => ({
+              id: o.id,
+              option_text: o.option_text,
+              option_value: o.option_value
+            }))
+        }))
+
+        return reply.send({
+          ok: true,
+          data: {
+            form: {
+              uuid: form.uuid,
+              title: form.title,
+              description: form.description,
+              form_type: form.form_type,
+              requires_login: !!form.requires_login,
+              show_progress_bar: !!form.show_progress_bar,
+              shuffle_questions: !!form.shuffle_questions,
+              welcome_message: form.welcome_message,
+              submit_message: form.submit_message,
+              time_limit_minutes: form.time_limit_minutes,
+              passing_score: form.passing_score,
+              requires_odoo_validation: !!form.requires_odoo_validation
+            },
+            questions: questionsWithOptions
+          }
+        })
+
+      } finally {
+        connection.release()
+      }
+    } catch (error) {
+      req.log.error(error)
+      return reply.code(500).send({ ok: false, error: 'Error al obtener formulario' })
     }
-  } catch (error) {
-    req.log.error(error)
-    return reply.code(500).send({ 
-      ok: false, 
-      error: 'Error al obtener formulario' 
-    })
   }
-}
 }
 
 // ═══════════════════════════════════════
@@ -1053,22 +969,12 @@ static async getPublicForm(req, reply) {
 function convertToCSV(data) {
   if (!data.length) return ''
   
-  // Headers
   const headers = [
-    'ID Respuesta',
-    'Email',
-    'Nombre',
-    'Estado',
-    'Fecha Inicio',
-    'Fecha Envío',
-    'Tiempo (min)',
-    'Puntuación (%)',
-    'Aprobado',
-    'Pregunta',
-    'Respuesta'
+    'ID Respuesta', 'Email', 'Nombre', 'Estado',
+    'Fecha Inicio', 'Fecha Envío', 'Tiempo (min)',
+    'Puntuación (%)', 'Aprobado', 'Pregunta', 'Respuesta'
   ]
   
-  // Agrupar por respuesta
   const responseMap = {}
   data.forEach(row => {
     if (!responseMap[row.response_id]) {
@@ -1092,7 +998,10 @@ function convertToCSV(data) {
       let answer = row.answer_text || ''
       if (row.answer_number !== null) answer = row.answer_number
       if (row.answer_date) answer = row.answer_date
-      if (row.selected_options) answer = JSON.parse(row.selected_options).join(', ')
+      if (row.selected_options) {
+        const parsed = safeJsonParse(row.selected_options)
+        if (Array.isArray(parsed)) answer = parsed.join(', ')
+      }
       
       responseMap[row.response_id].answers.push({
         question: row.question_text,
@@ -1101,12 +1010,11 @@ function convertToCSV(data) {
     }
   })
   
-  // Construir filas CSV
   const rows = [headers.join(',')]
   
   Object.values(responseMap).forEach(response => {
     const base = response.base
-    response.answers.forEach((qa, index) => {
+    response.answers.forEach((qa) => {
       const row = [
         base.response_id,
         `"${base.respondent_email}"`,
@@ -1131,6 +1039,3 @@ function formatDate(date) {
   if (!date) return ''
   return new Date(date).toLocaleString('es-PE')
 }
-
-
-
