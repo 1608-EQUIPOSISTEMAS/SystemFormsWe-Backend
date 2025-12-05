@@ -25,10 +25,9 @@ export default async function formRoutes(fastify) {
     protectedRoutes.delete('/:uuid', FormController.delete)
     protectedRoutes.post('/:uuid/duplicate', FormController.duplicate)
 
-    // ✅ Estadísticas del formulario
     protectedRoutes.get('/:uuid/stats', FormController.getStats)
+    protectedRoutes.get('/:uuid/responses/:responseId', FormController.getResponseDetail)
 
-    // ✅ Respuestas del formulario
     protectedRoutes.get('/:uuid/responses', FormController.getResponses)
     protectedRoutes.get('/:uuid/responses/export', FormController.exportResponses)
   })

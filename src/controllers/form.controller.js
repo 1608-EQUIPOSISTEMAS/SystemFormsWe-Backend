@@ -961,6 +961,143 @@ export class FormController {
       return reply.code(500).send({ ok: false, error: 'Error al obtener formulario' })
     }
   }
+
+  static async getResponseDetail(req, reply) {
+    const { uuid, responseId } = req.params
+    const userId = req.user?.id
+
+    try {
+      const connection = await pool.getConnection()
+      try {
+        // Verificar que el formulario pertenece al usuario
+        const [forms] = await connection.query(
+          'SELECT id, form_type FROM forms WHERE uuid = ? AND created_by = ?',
+          [uuid, userId]
+        )
+
+        if (forms.length === 0) {
+          return reply.code(404).send({ 
+            ok: false, 
+            error: 'Formulario no encontrado' 
+          })
+        }
+
+        const formId = forms[0].id
+        const isExam = forms[0].form_type === 'EXAM'
+
+        // Obtener la respuesta
+        const [responses] = await connection.query(`
+          SELECT 
+            fr.id,
+            fr.response_uuid,
+            fr.status,
+            fr.started_at,
+            fr.submitted_at,
+            fr.respondent_email,
+            COALESCE(
+              NULLIF(TRIM(CONCAT(COALESCE(fr.odoo_student_names, ''), ' ', COALESCE(fr.odoo_student_surnames, ''))), ''),
+              NULLIF(TRIM(CONCAT(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, ''))), ''),
+              fr.respondent_email,
+              'Anónimo'
+            ) as respondent_name,
+            fr.total_score,
+            fr.max_possible_score,
+            fr.percentage_score,
+            fr.passed,
+            fr.duration_minutes,
+            fr.odoo_certificate_pdf
+          FROM form_responses fr
+          LEFT JOIN users u ON fr.user_id = u.id
+          WHERE fr.id = ? AND fr.form_id = ?
+        `, [responseId, formId])
+
+        if (responses.length === 0) {
+          return reply.code(404).send({ 
+            ok: false, 
+            error: 'Respuesta no encontrada' 
+          })
+        }
+
+        const response = responses[0]
+
+        // Obtener TODAS las preguntas del formulario con sus respuestas (si existen)
+        const [questionsWithAnswers] = await connection.query(`
+          SELECT 
+            q.id as question_id,
+            q.uuid as question_uuid,
+            q.question_text,
+            qt.code as question_type,
+            q.points as max_points,
+            q.display_order,
+            q.is_required,
+            ra.id as answer_id,
+            ra.answer_text,
+            ra.answer_number,
+            ra.answer_date,
+            ra.is_correct,
+            ra.points_earned
+          FROM questions q
+          LEFT JOIN question_types qt ON q.question_type_id = qt.id
+          LEFT JOIN response_answers ra ON ra.question_id = q.id AND ra.response_id = ?
+          WHERE q.form_id = ? AND q.is_active = 1
+          ORDER BY q.display_order ASC
+        `, [response.id, formId])
+
+        // Construir el array de answers
+        const answers = []
+        
+        for (const row of questionsWithAnswers) {
+          const answer = {
+            question_id: row.question_id,
+            question_uuid: row.question_uuid,
+            question_text: row.question_text,
+            question_type: row.question_type,
+            max_points: row.max_points,
+            display_order: row.display_order,
+            is_required: row.is_required,
+            // Datos de la respuesta (pueden ser null si no respondió)
+            answer_text: row.answer_text,
+            answer_number: row.answer_number,
+            answer_date: row.answer_date,
+            is_correct: row.is_correct,
+            points_earned: row.points_earned,
+            selected_options: []
+          }
+
+          // Si hay respuesta y es tipo múltiple, obtener opciones seleccionadas
+          if (row.answer_id) {
+            const [selectedOptions] = await connection.query(`
+              SELECT qo.option_text
+              FROM response_answer_options rao
+              JOIN question_options qo ON rao.option_id = qo.id
+              WHERE rao.answer_id = ?
+            `, [row.answer_id])
+
+            answer.selected_options = selectedOptions.map(o => o.option_text)
+          }
+
+          answers.push(answer)
+        }
+
+        return reply.send({
+          ok: true,
+          data: {
+            ...response,
+            answers
+          }
+        })
+
+      } finally {
+        connection.release()
+      }
+    } catch (error) {
+      req.log.error(error)
+      return reply.code(500).send({ 
+        ok: false, 
+        error: 'Error al obtener detalle de respuesta' 
+      })
+    }
+  }
 }
 
 // ═══════════════════════════════════════
