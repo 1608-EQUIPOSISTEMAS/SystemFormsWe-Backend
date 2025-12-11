@@ -14,4 +14,7 @@ export default async function publicRoutes(fastify) {
   
   // Obtener resultado
   fastify.get('/responses/:response_uuid/result', ResponseController.getResult)
+
+    fastify.get('/certificate/:responseUuid', ResponseController.getCertificatePdf)
+
 }

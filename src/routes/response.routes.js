@@ -8,9 +8,6 @@ export default async function responseRoutes(fastify) {
   // ═══════════════════════════════════════
   fastify.post('/submit', ResponseController.submit)
 
-  fastify.get('/certificate/:responseUuid', ResponseController.getCertificatePdf)
-
-
   // ═══════════════════════════════════════
   // RUTAS PROTEGIDAS
   // ═══════════════════════════════════════
