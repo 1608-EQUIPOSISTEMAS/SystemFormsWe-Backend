@@ -69,18 +69,15 @@ export class ResponseController {
   static async submit(req, reply) {
     const { 
       form_uuid, 
-      answers = [], 
-      respondent_email, 
-      respondent_name, 
+      answers, 
       time_spent,
+      respondent_email,
+      respondent_name,
       odoo_partner_id,
       odoo_student_names,
-      odoo_student_surnames
+      odoo_student_surnames,
+      questions_shown // NUEVO: Array de IDs de preguntas mostradas
     } = req.body
-    
-    if (!form_uuid) {
-      return reply.code(400).send({ ok: false, error: 'form_uuid es requerido' })
-    }
 
     const connection = await pool.getConnection()
     
@@ -92,8 +89,9 @@ export class ResponseController {
         `SELECT id, form_type, passing_score, show_score_after_submit, 
                 show_correct_answers, title,
                 requires_odoo_validation, odoo_course_name, 
-                odoo_slide_channel_id, odoo_academic_hours, odoo_course_type
-         FROM forms WHERE uuid = ? AND is_active = 1`,
+                odoo_slide_channel_id, odoo_academic_hours, odoo_course_type,
+                use_question_bank, questions_to_show
+        FROM forms WHERE uuid = ? AND is_active = 1`,
         [form_uuid]
       )
       
@@ -111,23 +109,34 @@ export class ResponseController {
         INSERT INTO form_responses (
           response_uuid, form_id, respondent_email, respondent_name,
           odoo_partner_id, odoo_student_names, odoo_student_surnames,
+          questions_shown,
           status, started_at, submitted_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'SUBMITTED', NOW(), NOW())
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SUBMITTED', NOW(), NOW())
       `, [
         responseUuid, form.id, respondent_email, respondent_name,
-        odoo_partner_id || null, odoo_student_names || null, odoo_student_surnames || null
+        odoo_partner_id || null, odoo_student_names || null, odoo_student_surnames || null,
+        questions_shown ? JSON.stringify(questions_shown) : null
       ])
       
       const responseId = responseResult.insertId
 
-      // 3. Obtener preguntas
-      const [questions] = await connection.query(`
+      // 3. Obtener preguntas - SOLO las mostradas si hay banco de preguntas
+      let questionsQuery = `
         SELECT q.id, q.question_text, q.points, q.question_type_id,
-               qt.code as type_code
+              qt.code as type_code
         FROM questions q
         JOIN question_types qt ON q.question_type_id = qt.id
         WHERE q.form_id = ? AND q.is_active = 1
-      `, [form.id])
+      `
+      let queryParams = [form.id]
+
+      // Si hay preguntas mostradas específicas, filtrar solo esas
+      if (questions_shown && questions_shown.length > 0) {
+        questionsQuery += ` AND q.id IN (?)`
+        queryParams.push(questions_shown)
+      }
+
+      const [questions] = await connection.query(questionsQuery, queryParams)
 
       const questionMap = new Map()
       for (const q of questions) {
@@ -142,7 +151,7 @@ export class ResponseController {
         const [options] = await connection.query(`
           SELECT question_id, id, option_text, is_correct, points
           FROM question_options
-          WHERE question_id IN (?) AND is_active = 1
+          WHERE question_id IN (?)
         `, [questionIds])
         
         for (const opt of options) {
@@ -153,251 +162,136 @@ export class ResponseController {
         }
       }
 
-            let totalScore = 0
-      let maxPossibleScore = 0
+      // 5. Procesar respuestas
+      let totalScore = 0
       let correctCount = 0
+      let maxPossibleScore = 0
       const details = []
 
       for (const answer of answers) {
         const question = questionMap.get(answer.question_id)
-        if (!question) {
-          console.log(`⚠️ Question ${answer.question_id} not found in map`)
-          continue
-        }
+        if (!question) continue // Ignorar respuestas de preguntas no mostradas
 
-        const qOptions = correctOptionsMap.get(answer.question_id) || []
-        const correctOptions = qOptions.filter(o => o.is_correct)
+        const questionPoints = parseFloat(question.points) || 1
+        maxPossibleScore += questionPoints
         
-        // Calcular puntos máximos de la pregunta
-        const questionMaxScore = parseFloat(question.points) || 
-          correctOptions.reduce((sum, o) => sum + (parseFloat(o.points) || 1), 0) || 1
-        maxPossibleScore += parseFloat(questionMaxScore)
+        let isCorrect = null
+        let pointsEarned = 0
+        let answerText = ''
+        let correctAnswerText = ''
 
-        let isCorrect = false
-        let earnedPoints = 0
-        let userAnswerText = ''
-        let correctAnswerText = correctOptions.map(o => o.option_text).join(', ')
+        const typeCode = question.type_code?.toUpperCase()
+        const questionOptions = correctOptionsMap.get(question.id) || []
+        const correctOptions = questionOptions.filter(o => o.is_correct)
 
-        const typeCode = (question.type_code || '').toUpperCase()
-
-        console.log(`📝 Processing Q${answer.question_id}: type=${typeCode}, answer_value=${JSON.stringify(answer.answer_value)}`)
-        console.log(`   Options available: ${qOptions.map(o => `${o.id}:${o.option_text}:correct=${o.is_correct}`).join(', ')}`)
-
-        // ═══════════════════════════════════════════════════════════════
-        // RADIO, SELECT, DROPDOWN, SINGLE_CHOICE - Selección única
-        // ═══════════════════════════════════════════════════════════════
-        if (typeCode === 'RADIO' || typeCode === 'SELECT' || typeCode === 'DROPDOWN' || typeCode === 'SINGLE_CHOICE') {
-          // ✅ CORRECCIÓN: Convertir a número para comparar correctamente
-          const rawValue = Array.isArray(answer.answer_value) ? answer.answer_value[0] : answer.answer_value
-          const selectedId = parseInt(rawValue, 10)
+        if (typeCode === 'RADIO' || typeCode === 'SINGLE_CHOICE') {
+          const selectedId = parseInt(answer.answer_value)
+          const selectedOption = questionOptions.find(o => o.id === selectedId)
+          answerText = selectedOption?.option_text || 'Sin respuesta'
           
-          console.log(`   Looking for option with id=${selectedId} (raw: ${rawValue}, type: ${typeof rawValue})`)
-          
-          // ✅ CORRECCIÓN: Usar parseInt también en la búsqueda para seguridad
-          const selectedOption = qOptions.find(o => parseInt(o.id, 10) === selectedId)
-          
-          if (selectedOption) {
-            userAnswerText = selectedOption.option_text
-            isCorrect = !!selectedOption.is_correct // Asegurar booleano
-            earnedPoints = isCorrect ? parseFloat(questionMaxScore) : 0
-            console.log(`   ✅ Found option: "${selectedOption.option_text}", is_correct=${selectedOption.is_correct}, earnedPoints=${earnedPoints}`)
-          } else {
-            userAnswerText = String(rawValue || 'Sin respuesta')
-            console.log(`   ⚠️ Option not found for id=${selectedId}`)
+          if (correctOptions.length > 0) {
+            const correctOption = correctOptions[0]
+            correctAnswerText = correctOption.option_text
+            isCorrect = selectedId === correctOption.id
+            if (isCorrect) {
+              pointsEarned = questionPoints
+              correctCount++
+            }
           }
-        } 
-        // ═══════════════════════════════════════════════════════════════
-        // CHECKBOX, MULTIPLE_CHOICE - Selección múltiple
-        // ═══════════════════════════════════════════════════════════════
-        else if (typeCode === 'CHECKBOX' || typeCode === 'MULTIPLE_CHOICE') {
-          // ✅ CORRECCIÓN: Convertir todos los IDs a números
-          const rawIds = Array.isArray(answer.answer_value) 
-            ? answer.answer_value 
-            : [answer.answer_value].filter(Boolean)
-          const selectedIds = rawIds.map(id => parseInt(id, 10)).filter(id => !isNaN(id))
+        } else if (typeCode === 'CHECKBOX' || typeCode === 'MULTIPLE_CHOICE') {
+          const selectedIds = Array.isArray(answer.answer_value) 
+            ? answer.answer_value.map(id => parseInt(id))
+            : []
+          const selectedOptions = questionOptions.filter(o => selectedIds.includes(o.id))
+          answerText = selectedOptions.map(o => o.option_text).join(', ') || 'Sin respuesta'
           
-          // Convertir IDs correctos a números también
-          const correctIds = correctOptions.map(o => parseInt(o.id, 10))
-          
-          console.log(`   Selected IDs: [${selectedIds.join(',')}], Correct IDs: [${correctIds.join(',')}]`)
-          
-          const selectedTexts = qOptions
-            .filter(o => selectedIds.includes(parseInt(o.id, 10)))
-            .map(o => o.option_text)
-          userAnswerText = selectedTexts.join(', ') || 'Sin respuesta'
-          
-          // Verificar si todas las seleccionadas son correctas y no falta ninguna
-          const allSelectedAreCorrect = selectedIds.every(id => correctIds.includes(id))
-          const allCorrectAreSelected = correctIds.every(id => selectedIds.includes(id))
-          isCorrect = selectedIds.length > 0 && allSelectedAreCorrect && allCorrectAreSelected
-          
-          earnedPoints = isCorrect ? parseFloat(questionMaxScore) : 0
-          console.log(`   ✅ Checkbox result: allSelectedCorrect=${allSelectedAreCorrect}, allCorrectSelected=${allCorrectAreSelected}, isCorrect=${isCorrect}`)
-        }
-        // ═══════════════════════════════════════════════════════════════
-        // TRUE_FALSE
-        // ═══════════════════════════════════════════════════════════════
-        else if (typeCode === 'TRUE_FALSE') {
-          const userValue = answer.answer_value
-          userAnswerText = userValue === true || userValue === 'true' ? 'Verdadero' : 'Falso'
-          
-          const correctOpt = correctOptions[0]
-          if (correctOpt) {
-            const correctText = (correctOpt.option_text || '').toLowerCase().trim()
-            const correctValue = correctText === 'verdadero' || correctText === 'true' || correctText === 'v'
-            const userBool = userValue === true || userValue === 'true'
-            isCorrect = userBool === correctValue
-            console.log(`   TRUE_FALSE: user=${userBool}, correct=${correctValue}, isCorrect=${isCorrect}`)
+          if (correctOptions.length > 0) {
+            correctAnswerText = correctOptions.map(o => o.option_text).join(', ')
+            const correctIds = correctOptions.map(o => o.id)
+            isCorrect = selectedIds.length === correctIds.length &&
+                        selectedIds.every(id => correctIds.includes(id))
+            if (isCorrect) {
+              pointsEarned = questionPoints
+              correctCount++
+            }
           }
-          earnedPoints = isCorrect ? parseFloat(questionMaxScore) : 0
-        }
-        // ═══════════════════════════════════════════════════════════════
-        // RATING, SCALE - Numéricos
-        // ═══════════════════════════════════════════════════════════════
-        else if (typeCode === 'RATING' || typeCode === 'SCALE') {
-          userAnswerText = String(answer.answer_value || 0)
-          // Estos tipos generalmente no tienen respuesta "correcta"
-          isCorrect = null
-          earnedPoints = 0
-        }
-        // ═══════════════════════════════════════════════════════════════
-        // TEXT, TEXTAREA, EMAIL, NUMBER, etc. - Requieren revisión manual
-        // ═══════════════════════════════════════════════════════════════
-        else {
-          userAnswerText = String(answer.answer_value || '')
-          correctAnswerText = '(Requiere revisión manual)'
-          isCorrect = null // null = pendiente de revisión
-          earnedPoints = 0
-        }
-
-        // Sumar puntos si es correcto
-        if (isCorrect === true) {
-          correctCount++
-          totalScore += earnedPoints
+        } else if (typeCode === 'TRUE_FALSE') {
+          const userAnswer = answer.answer_value
+          answerText = userAnswer === true ? 'Verdadero' : userAnswer === false ? 'Falso' : 'Sin respuesta'
+          
+          if (correctOptions.length > 0) {
+            const correctOption = correctOptions[0]
+            correctAnswerText = correctOption.option_text
+            const correctBool = correctOption.option_value === 'true' || 
+                              correctOption.option_text?.toLowerCase() === 'verdadero'
+            isCorrect = userAnswer === correctBool
+            if (isCorrect) {
+              pointsEarned = questionPoints
+              correctCount++
+            }
+          }
+        } else {
+          // TEXT, TEXTAREA, NUMBER, etc.
+          answerText = String(answer.answer_value || '')
         }
 
-        console.log(`   📊 Final: isCorrect=${isCorrect}, earnedPoints=${earnedPoints}, totalScore=${totalScore}`)
+        totalScore += pointsEarned
 
-        // Guardar respuesta individual
+        // Guardar respuesta
         await connection.query(`
           INSERT INTO response_answers (
-            response_id, question_id, answer_text,
-            is_correct, points_earned
+            response_id, question_id, answer_text, is_correct, points_earned
           ) VALUES (?, ?, ?, ?, ?)
-        `, [
-          responseId, 
-          answer.question_id,
-          userAnswerText,
-          isCorrect === true ? 1 : (isCorrect === false ? 0 : null),
-          earnedPoints
-        ])
+        `, [responseId, question.id, answerText, isCorrect, pointsEarned])
 
+        // Agregar a detalles
         details.push({
-          question_id: answer.question_id,
+          question_id: question.id,
           question_text: question.question_text,
-          user_answer: userAnswerText,
+          user_answer: answerText,
           correct_answer: correctAnswerText,
           is_correct: isCorrect,
-          points_earned: earnedPoints,
-          points_possible: questionMaxScore
+          points: questionPoints,
+          points_earned: pointsEarned
         })
       }
 
-      console.log(`\n🎯 FINAL SCORE: ${totalScore}/${maxPossibleScore} (${correctCount} correct)`)
-
-      // 6. Calcular porcentaje
+      // 6. Calcular porcentaje y si aprobó
       const percentage = maxPossibleScore > 0 
         ? Math.round((totalScore / maxPossibleScore) * 100) 
         : 0
-      const passed = form.passing_score 
-        ? percentage >= parseFloat(form.passing_score) 
-        : null
+      const passed = form.passing_score ? percentage >= form.passing_score : true
 
-      console.log(`🎯 Percentage: ${percentage}%, Passed: ${passed}`)
-
-      // 7. Actualizar respuesta
+      // 7. Actualizar form_response con resultados
       await connection.query(`
         UPDATE form_responses SET
           total_score = ?,
           max_possible_score = ?,
           percentage_score = ?,
-          passed = ?
+          passed = ?,
+          duration_minutes = ?
         WHERE id = ?
-      `, [totalScore, maxPossibleScore, percentage, passed ? 1 : 0, responseId])
+      `, [totalScore, maxPossibleScore, percentage, passed ? 1 : 0, time_spent, responseId])
 
-      // 8. CERTIFICACIÓN EN ODOO
+      // 8. Generar certificado Odoo si aplica
       let odooResult = null
-
-      if (isExam && passed && form.requires_odoo_validation && odoo_partner_id && form.odoo_course_name) {
+      if (isExam && passed && form.requires_odoo_validation && odoo_partner_id) {
         try {
-          console.log('🎯 Iniciando proceso de certificación...')
-          
-          const certResult = await odooService.certifyStudent(
-            {
-              partner_id: odoo_partner_id,
-              names: odoo_student_names || respondent_name,
-              surnames: odoo_student_surnames || ''
-            },
-            {
-              course_name: form.odoo_course_name,
-              final_score: totalScore,
-              completion_date: new Date().toISOString()
-            }
-          )
-
-          console.log('🎯 Resultado certificación:', certResult.ok ? 'OK' : 'FAIL')
-
-          if (certResult.ok) {
-            console.log('🎯 Guardando en BD...', {
-              certificate_id: certResult.certificate.id,
-              pdf_url: certResult.certificate.pdf_url?.substring(0, 100) + '...'
-            })
-            
-            await connection.query(`
-              UPDATE form_responses SET
-                odoo_certificate_id = ?,
-                odoo_certificate_pdf = ?
-              WHERE id = ?
-            `, [certResult.certificate.id, certResult.certificate.pdf_url, responseId])
-
-            console.log('🎯 Guardado en BD exitoso')
-
-            odooResult = {
-              certificate_id: certResult.certificate.id,
-              pdf_url: certResult.certificate.pdf_url,
-              message: '¡Certificado generado! Ya puedes verlo en la intranet de W|E'
-            }
-          } else {
-            console.error('Error certificando en Odoo:', certResult.error)
-            odooResult = {
-              error: true,
-              message: 'Tu respuesta fue guardada pero hubo un error generando el certificado.'
-            }
-          }
-        } catch (odooError) {
-          console.error('🎯 Odoo certification error:', odooError)
-          odooResult = { error: true, message: 'Error al generar certificado en Odoo' }
+          odooResult = await generateOdooCertificate({
+            form,
+            partnerId: odoo_partner_id,
+            studentNames: odoo_student_names,
+            studentSurnames: odoo_student_surnames,
+            percentage,
+            responseId,
+            connection
+          })
+        } catch (odooErr) {
+          req.log.error('Error Odoo certificate:', odooErr)
         }
       }
 
-      console.log('🎯 Haciendo commit...')
       await connection.commit()
-      console.log('🎯 Commit exitoso, enviando respuesta...')
-
-      await connection.commit()
-
-      try {
-        await NotificationController.notifyNewResponse(
-          form.id,                             // form_id
-          form.title,                          // form_title
-          responseId,                          // response_id
-          respondent_name || respondent_email, // nombre del respondiente
-          form_uuid                            // form_uuid para el link
-        )
-      } catch (notifError) {
-        // No fallar si la notificación falla, solo loggear
-        console.error('Error al crear notificación:', notifError)
-      }
 
       // 9. Respuesta
       const response = {
