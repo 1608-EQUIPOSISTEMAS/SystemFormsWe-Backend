@@ -1,5 +1,6 @@
 // src/controllers/linkedin.controller.js
 import { odooService } from '../services/odoo.service.js'
+import puppeteer from 'puppeteer'
 
 const LINKEDIN_CLIENT_ID = process.env.LINKEDIN_CLIENT_ID || ''
 const LINKEDIN_CLIENT_SECRET = process.env.LINKEDIN_CLIENT_SECRET || ''
@@ -112,7 +113,13 @@ export class LinkedInController {
         body: JSON.stringify({
           author: `urn:li:person:${user_id}`,
           lifecycleState: 'PUBLISHED',
-          specificContent: { 'com.linkedin.ugc.ShareContent': { shareCommentary: { text }, shareMediaCategory: assets.length ? 'IMAGE' : 'NONE', ...(assets.length && { media: assets.map(a => ({ status: 'READY', media: a })) }) } },
+          specificContent: { 
+            'com.linkedin.ugc.ShareContent': { 
+              shareCommentary: { text }, 
+              shareMediaCategory: assets.length ? 'IMAGE' : 'NONE', 
+              ...(assets.length && { media: assets.map(a => ({ status: 'READY', media: a })) }) 
+            } 
+          },
           visibility: { 'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC' }
         }),
       })
@@ -124,66 +131,179 @@ export class LinkedInController {
     }
   }
 
-  // ═══════════════════════════════════════
-  // ★★★ PDF A IMAGEN - pdf-to-png-converter ★★★
-  // ═══════════════════════════════════════
+  // ═══════════════════════════════════════════════════════════════
+  // ★★★ PDF A IMAGEN - USANDO PUPPETEER ★★★
+  // ═══════════════════════════════════════════════════════════════
   static async pdfToImage(req, reply) {
     const { pdf_url, certificate_id } = req.body
     if (!pdf_url && !certificate_id) {
       return reply.code(400).send({ ok: false, error: 'Falta pdf_url o certificate_id' })
     }
 
+    let browser = null
+
     try {
-      let pdfBuffer
+      let pdfBase64
 
       if (certificate_id) {
         console.log('📄 Obteniendo PDF de Odoo ID:', certificate_id)
-        const pdfBase64 = await odooService.getCertificatePdfBase64(certificate_id)
+        pdfBase64 = await odooService.getCertificatePdfBase64(certificate_id)
         if (!pdfBase64) {
           return reply.code(400).send({ ok: false, error: 'No se pudo obtener PDF de Odoo' })
         }
-        pdfBuffer = Buffer.from(pdfBase64, 'base64')
-        console.log('📄 PDF obtenido, tamaño:', pdfBuffer.length)
+        console.log('📄 PDF obtenido, longitud base64:', pdfBase64.length)
       } else {
         console.log('📄 Descargando PDF:', pdf_url)
         const res = await fetch(pdf_url)
         if (!res.ok) {
           return reply.code(400).send({ ok: false, error: 'No se pudo descargar PDF' })
         }
-        pdfBuffer = Buffer.from(await res.arrayBuffer())
+        const buffer = Buffer.from(await res.arrayBuffer())
+        pdfBase64 = buffer.toString('base64')
       }
 
-      // ★ Convertir PDF a PNG
-      console.log('🎨 Convirtiendo PDF a imagen...')
-      const { pdfToPng } = await import('pdf-to-png-converter')
+      console.log('🎨 Iniciando Puppeteer para renderizar PDF...')
       
-      const pngPages = await pdfToPng(pdfBuffer, {
-        viewportScale: 2.0,
-        disableFontFace: false,
-        useSystemFonts: true,
-        pagesToProcess: [1]
+      browser = await puppeteer.launch({
+        headless: 'new',
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--font-render-hinting=none'
+        ]
       })
 
-      if (!pngPages || pngPages.length === 0) {
-        throw new Error('No se pudo convertir el PDF')
-      }
+      const page = await browser.newPage()
 
-      const imageBuffer = pngPages[0].content
+      // HTML con pdf.js - CENTRADO Y A TAMAÑO COMPLETO
+      const pdfJsHtml = `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+          <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            html, body { 
+              width: 100%; 
+              height: 100%; 
+              background: white;
+              display: flex;
+              align-items: center;
+              justify-content: center;
+            }
+            #canvas-container { 
+              display: flex; 
+              align-items: center;
+              justify-content: center;
+              width: 100%;
+              height: 100%;
+            }
+            canvas { 
+              display: block;
+              max-width: 100%;
+              max-height: 100%;
+            }
+          </style>
+        </head>
+        <body>
+          <div id="canvas-container">
+            <canvas id="pdf-canvas"></canvas>
+          </div>
+          <script>
+            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+            
+            const pdfData = atob('${pdfBase64}');
+            const pdfArray = new Uint8Array(pdfData.length);
+            for (let i = 0; i < pdfData.length; i++) {
+              pdfArray[i] = pdfData.charCodeAt(i);
+            }
+            
+            pdfjsLib.getDocument({ data: pdfArray }).promise.then(function(pdf) {
+              pdf.getPage(1).then(function(page) {
+                // Escala alta para buena calidad
+                const scale = 3.0;
+                const viewport = page.getViewport({ scale: scale });
+                
+                const canvas = document.getElementById('pdf-canvas');
+                const context = canvas.getContext('2d');
+                canvas.height = viewport.height;
+                canvas.width = viewport.width;
+                
+                // Fondo blanco
+                context.fillStyle = 'white';
+                context.fillRect(0, 0, canvas.width, canvas.height);
+                
+                page.render({
+                  canvasContext: context,
+                  viewport: viewport
+                }).promise.then(function() {
+                  window.pdfRendered = true;
+                  window.canvasWidth = canvas.width;
+                  window.canvasHeight = canvas.height;
+                });
+              });
+            });
+          </script>
+        </body>
+        </html>
+      `
+
+      await page.setContent(pdfJsHtml, { waitUntil: 'networkidle0' })
+
+      // Esperar renderizado
+      console.log('⏳ Esperando renderizado del PDF...')
+      await page.waitForFunction('window.pdfRendered === true', { timeout: 30000 })
+      
+      // Pausa para asegurar renderizado completo
+      await new Promise(resolve => setTimeout(resolve, 500))
+
+      // Obtener dimensiones reales del canvas
+      const dimensions = await page.evaluate(() => ({
+        width: window.canvasWidth,
+        height: window.canvasHeight
+      }))
+
+      console.log('📐 Dimensiones del canvas:', dimensions)
+
+      // Ajustar viewport al tamaño del canvas
+      await page.setViewport({
+        width: dimensions.width,
+        height: dimensions.height,
+        deviceScaleFactor: 1
+      })
+
+      // Esperar un momento después de resize
+      await new Promise(resolve => setTimeout(resolve, 300))
+
+      // Screenshot SOLO del canvas (no de toda la página)
+      const canvas = await page.$('#pdf-canvas')
+      const imageBuffer = await canvas.screenshot({ 
+        type: 'png',
+        omitBackground: false
+      })
+
+      await browser.close()
+      browser = null
+
       const imageBase64 = imageBuffer.toString('base64')
-
-      console.log('✅ PDF convertido, tamaño imagen:', imageBuffer.length)
+      console.log('✅ PDF renderizado correctamente, tamaño:', imageBuffer.length, 'bytes')
 
       return reply.send({
         ok: true,
         data: {
           image_base64: imageBase64,
-          width: pngPages[0].width,
-          height: pngPages[0].height
+          width: dimensions.width,
+          height: dimensions.height
         }
       })
 
     } catch (error) {
       console.error('❌ Error PDF:', error.message)
+      if (browser) {
+        await browser.close()
+      }
       return reply.code(500).send({ ok: false, error: error.message })
     }
   }
