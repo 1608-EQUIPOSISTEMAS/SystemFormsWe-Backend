@@ -274,22 +274,75 @@ export class ResponseController {
       `, [totalScore, maxPossibleScore, percentage, passed ? 1 : 0, time_spent, responseId])
 
       // 8. Generar certificado Odoo si aplica
-      let odooResult = null
-      if (isExam && passed && form.requires_odoo_validation && odoo_partner_id) {
-        try {
-          odooResult = await generateOdooCertificate({
-            form,
-            partnerId: odoo_partner_id,
-            studentNames: odoo_student_names,
-            studentSurnames: odoo_student_surnames,
-            percentage,
-            responseId,
-            connection
-          })
-        } catch (odooErr) {
-          req.log.error('Error Odoo certificate:', odooErr)
+let odooResult = null
+
+    // Verificar TODAS las condiciones necesarias
+    console.log('🎯 Verificando condiciones para certificación:')
+    console.log('   - isExam:', isExam)
+    console.log('   - passed:', passed)
+    console.log('   - requires_odoo_validation:', form.requires_odoo_validation)
+    console.log('   - odoo_partner_id:', odoo_partner_id)
+    console.log('   - odoo_course_name:', form.odoo_course_name)
+
+    if (isExam && passed && form.requires_odoo_validation && odoo_partner_id && form.odoo_course_name) {
+      try {
+        console.log('🎯 Iniciando proceso de certificación...')
+        
+        // Importar el servicio de Odoo
+        const { odooService } = await import('../services/odoo.service.js')
+        
+        const certResult = await odooService.certifyStudent(
+          {
+            partner_id: odoo_partner_id,
+            names: odoo_student_names || respondent_name || '',
+            surnames: odoo_student_surnames || ''
+          },
+          {
+            course_name: form.odoo_course_name,
+            final_score: totalScore,
+            completion_date: new Date().toISOString()
+          }
+        )
+
+        console.log('🎯 Resultado certificación:', certResult.ok ? 'OK' : 'FAIL')
+
+        if (certResult.ok) {
+          console.log('🎯 Guardando certificado en BD...')
+          
+          await connection.query(`
+            UPDATE form_responses SET
+              odoo_certificate_id = ?,
+              odoo_certificate_pdf = ?
+            WHERE id = ?
+          `, [certResult.certificate.id, certResult.certificate.pdf_url, responseId])
+
+          console.log('🎯 Certificado guardado exitosamente')
+
+          odooResult = {
+            certificate_id: certResult.certificate.id,
+            pdf_url: certResult.certificate.pdf_url,
+            message: '¡Certificado generado!'
+          }
+        } else {
+          console.error('❌ Error certificando en Odoo:', certResult.error)
+          odooResult = {
+            error: true,
+            message: 'Tu respuesta fue guardada pero hubo un error generando el certificado: ' + certResult.error
+          }
+        }
+      } catch (odooError) {
+        console.error('🎯 Odoo certification error:', odooError.message)
+        odooResult = { 
+          error: true, 
+          message: 'Error al generar certificado: ' + odooError.message 
         }
       }
+    } else {
+      console.log('⚠️ No se genera certificado - condiciones no cumplidas')
+      if (!form.odoo_course_name) {
+        console.log('   ⚠️ Falta configurar odoo_course_name en el formulario')
+      }
+    }
 
       await connection.commit()
 
@@ -555,4 +608,48 @@ export class ResponseController {
       return reply.code(500).send({ ok: false, error: 'Error al obtener resultado' })
     }
   }
+
+  static async getCertificatePdf(req, reply) {
+  const { responseUuid } = req.params
+
+  try {
+    const connection = await pool.getConnection()
+    try {
+      // Buscar el certificado
+      const [responses] = await connection.query(`
+        SELECT odoo_certificate_id, odoo_certificate_pdf
+        FROM form_responses
+        WHERE response_uuid = ?
+      `, [responseUuid])
+
+      if (!responses.length || !responses[0].odoo_certificate_id) {
+        return reply.code(404).send({ ok: false, error: 'Certificado no encontrado' })
+      }
+
+      const { odoo_certificate_id } = responses[0]
+
+      // Obtener PDF de Odoo
+      const { odooService } = await import('../services/odoo.service.js')
+      const pdfBase64 = await odooService.getCertificatePdfBase64(odoo_certificate_id)
+
+      if (!pdfBase64) {
+        return reply.code(404).send({ ok: false, error: 'PDF no disponible' })
+      }
+
+      // Enviar PDF
+      const pdfBuffer = Buffer.from(pdfBase64, 'base64')
+      
+      reply.header('Content-Type', 'application/pdf')
+      reply.header('Content-Disposition', `inline; filename="certificado-${responseUuid}.pdf"`)
+      
+      return reply.send(pdfBuffer)
+
+    } finally {
+      connection.release()
+    }
+  } catch (error) {
+    req.log.error(error)
+    return reply.code(500).send({ ok: false, error: 'Error al obtener certificado' })
+  }
+}
 }

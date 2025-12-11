@@ -13,6 +13,7 @@ import syncRoutes from './sync.routes.js'
 
 export default async function routes(fastify) {
   fastify.register(publicRoutes, { prefix: '/public' })
+  // Obtener certificado PDF (proxy público)
 
   fastify.register(async (api) => {
     // Auth
@@ -22,6 +23,7 @@ export default async function routes(fastify) {
     api.register(dashboardRoutes, { prefix: '/dashboard' })
 
     api.register(linkedinRoutes, { prefix: '/linkedin' })
+    
 
     // Formularios
     api.register(formRoutes, { prefix: '/forms' })
