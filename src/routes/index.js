@@ -8,6 +8,8 @@ import courseRoutes from './course.routes.js'
 import responseRoutes from './response.routes.js'
 import linkedinRoutes from './linkedin.routes.js'
 import publicRoutes from './public.routes.js'
+import notificationRoutes from './notification.routes.js'
+import syncRoutes from './sync.routes.js' 
 
 export default async function routes(fastify) {
   fastify.register(publicRoutes, { prefix: '/public' })
@@ -29,7 +31,11 @@ export default async function routes(fastify) {
 
     // Cursos
     api.register(courseRoutes, { prefix: '/courses' })
+
+    api.register(notificationRoutes, { prefix: '/notifications' })
     
+    api.register(syncRoutes, { prefix: '/sync' })
+
     // Formulario público (existentes)
     api.register(uploadRoutes, { prefix: '/upload' })
     api.register(fileRoutes, { prefix: '/file' })

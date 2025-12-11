@@ -13,7 +13,7 @@ async function fixPassword() {
     port: 20070,
     database: 'railway',
     user: 'root',
-    password: 'ZPfrZjhdbEPCYCGWlMgThXPZMRrfOeOe' // ← Cambia esto
+    password: 'ZPfrZjhdbEPCYCGWlMgThXPZMRrfOeOe'
   })
   
   await connection.execute(

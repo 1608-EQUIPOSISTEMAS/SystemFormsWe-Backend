@@ -3,6 +3,7 @@ import cors from '@fastify/cors'
 import helmet from '@fastify/helmet'
 import { config } from './config/env.js'
 import routes from './routes/index.js'
+import { scheduler } from './services/scheduler.service.js'
 
 const app = Fastify({ 
   logger: { 
@@ -38,4 +39,16 @@ await app.register(routes, { prefix: '' })
 app.listen({ port: config.port, host: '0.0.0.0' }).then(addr => {
   app.log.info(`Servidor ejecutadose en ${addr}`)
   app.log.info(`Entorno: ${config.nodeEnv}`)
+
+    scheduler.startProgramSync(30 * 60 * 1000)
 })
+
+const shutdown = async () => {
+  app.log.info('Cerrando servidor...')
+  scheduler.stopAll()
+  await app.close()
+  process.exit(0)
+}
+
+process.on('SIGTERM', shutdown)
+process.on('SIGINT', shutdown)

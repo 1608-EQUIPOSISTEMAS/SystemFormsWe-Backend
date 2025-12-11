@@ -153,19 +153,22 @@ export class ResponseController {
         }
       }
 
-      // 5. Procesar respuestas
-      let totalScore = 0
+            let totalScore = 0
       let maxPossibleScore = 0
       let correctCount = 0
       const details = []
 
       for (const answer of answers) {
         const question = questionMap.get(answer.question_id)
-        if (!question) continue
+        if (!question) {
+          console.log(`⚠️ Question ${answer.question_id} not found in map`)
+          continue
+        }
 
         const qOptions = correctOptionsMap.get(answer.question_id) || []
         const correctOptions = qOptions.filter(o => o.is_correct)
         
+        // Calcular puntos máximos de la pregunta
         const questionMaxScore = parseFloat(question.points) || 
           correctOptions.reduce((sum, o) => sum + (parseFloat(o.points) || 1), 0) || 1
         maxPossibleScore += parseFloat(questionMaxScore)
@@ -177,52 +180,105 @@ export class ResponseController {
 
         const typeCode = (question.type_code || '').toUpperCase()
 
+        console.log(`📝 Processing Q${answer.question_id}: type=${typeCode}, answer_value=${JSON.stringify(answer.answer_value)}`)
+        console.log(`   Options available: ${qOptions.map(o => `${o.id}:${o.option_text}:correct=${o.is_correct}`).join(', ')}`)
+
+        // ═══════════════════════════════════════════════════════════════
         // RADIO, SELECT, DROPDOWN, SINGLE_CHOICE - Selección única
+        // ═══════════════════════════════════════════════════════════════
         if (typeCode === 'RADIO' || typeCode === 'SELECT' || typeCode === 'DROPDOWN' || typeCode === 'SINGLE_CHOICE') {
-          const selectedId = Array.isArray(answer.answer_value) ? answer.answer_value[0] : answer.answer_value
-          const selectedOption = qOptions.find(o => o.id === selectedId)
-          userAnswerText = selectedOption?.option_text || String(answer.answer_value || '')
-          isCorrect = selectedOption?.is_correct || false
-          earnedPoints = isCorrect ? parseFloat(questionMaxScore) : 0
+          // ✅ CORRECCIÓN: Convertir a número para comparar correctamente
+          const rawValue = Array.isArray(answer.answer_value) ? answer.answer_value[0] : answer.answer_value
+          const selectedId = parseInt(rawValue, 10)
+          
+          console.log(`   Looking for option with id=${selectedId} (raw: ${rawValue}, type: ${typeof rawValue})`)
+          
+          // ✅ CORRECCIÓN: Usar parseInt también en la búsqueda para seguridad
+          const selectedOption = qOptions.find(o => parseInt(o.id, 10) === selectedId)
+          
+          if (selectedOption) {
+            userAnswerText = selectedOption.option_text
+            isCorrect = !!selectedOption.is_correct // Asegurar booleano
+            earnedPoints = isCorrect ? parseFloat(questionMaxScore) : 0
+            console.log(`   ✅ Found option: "${selectedOption.option_text}", is_correct=${selectedOption.is_correct}, earnedPoints=${earnedPoints}`)
+          } else {
+            userAnswerText = String(rawValue || 'Sin respuesta')
+            console.log(`   ⚠️ Option not found for id=${selectedId}`)
+          }
         } 
+        // ═══════════════════════════════════════════════════════════════
         // CHECKBOX, MULTIPLE_CHOICE - Selección múltiple
+        // ═══════════════════════════════════════════════════════════════
         else if (typeCode === 'CHECKBOX' || typeCode === 'MULTIPLE_CHOICE') {
-          const selectedIds = Array.isArray(answer.answer_value) 
+          // ✅ CORRECCIÓN: Convertir todos los IDs a números
+          const rawIds = Array.isArray(answer.answer_value) 
             ? answer.answer_value 
             : [answer.answer_value].filter(Boolean)
-          const correctIds = correctOptions.map(o => o.id)
+          const selectedIds = rawIds.map(id => parseInt(id, 10)).filter(id => !isNaN(id))
+          
+          // Convertir IDs correctos a números también
+          const correctIds = correctOptions.map(o => parseInt(o.id, 10))
+          
+          console.log(`   Selected IDs: [${selectedIds.join(',')}], Correct IDs: [${correctIds.join(',')}]`)
           
           const selectedTexts = qOptions
-            .filter(o => selectedIds.includes(o.id))
+            .filter(o => selectedIds.includes(parseInt(o.id, 10)))
             .map(o => o.option_text)
-          userAnswerText = selectedTexts.join(', ') || String(answer.answer_value || '')
+          userAnswerText = selectedTexts.join(', ') || 'Sin respuesta'
           
-          isCorrect = selectedIds.length === correctIds.length &&
-                      selectedIds.every(id => correctIds.includes(id))
+          // Verificar si todas las seleccionadas son correctas y no falta ninguna
+          const allSelectedAreCorrect = selectedIds.every(id => correctIds.includes(id))
+          const allCorrectAreSelected = correctIds.every(id => selectedIds.includes(id))
+          isCorrect = selectedIds.length > 0 && allSelectedAreCorrect && allCorrectAreSelected
+          
           earnedPoints = isCorrect ? parseFloat(questionMaxScore) : 0
+          console.log(`   ✅ Checkbox result: allSelectedCorrect=${allSelectedAreCorrect}, allCorrectSelected=${allCorrectAreSelected}, isCorrect=${isCorrect}`)
         }
+        // ═══════════════════════════════════════════════════════════════
         // TRUE_FALSE
+        // ═══════════════════════════════════════════════════════════════
         else if (typeCode === 'TRUE_FALSE') {
-          userAnswerText = answer.answer_value === true ? 'Verdadero' : 'Falso'
+          const userValue = answer.answer_value
+          userAnswerText = userValue === true || userValue === 'true' ? 'Verdadero' : 'Falso'
+          
           const correctOpt = correctOptions[0]
           if (correctOpt) {
-            const correctValue = correctOpt.option_text.toLowerCase() === 'verdadero'
-            isCorrect = answer.answer_value === correctValue
+            const correctText = (correctOpt.option_text || '').toLowerCase().trim()
+            const correctValue = correctText === 'verdadero' || correctText === 'true' || correctText === 'v'
+            const userBool = userValue === true || userValue === 'true'
+            isCorrect = userBool === correctValue
+            console.log(`   TRUE_FALSE: user=${userBool}, correct=${correctValue}, isCorrect=${isCorrect}`)
           }
           earnedPoints = isCorrect ? parseFloat(questionMaxScore) : 0
         }
-        // TEXT, TEXTAREA, EMAIL, NUMBER, etc.
+        // ═══════════════════════════════════════════════════════════════
+        // RATING, SCALE - Numéricos
+        // ═══════════════════════════════════════════════════════════════
+        else if (typeCode === 'RATING' || typeCode === 'SCALE') {
+          userAnswerText = String(answer.answer_value || 0)
+          // Estos tipos generalmente no tienen respuesta "correcta"
+          isCorrect = null
+          earnedPoints = 0
+        }
+        // ═══════════════════════════════════════════════════════════════
+        // TEXT, TEXTAREA, EMAIL, NUMBER, etc. - Requieren revisión manual
+        // ═══════════════════════════════════════════════════════════════
         else {
           userAnswerText = String(answer.answer_value || '')
           correctAnswerText = '(Requiere revisión manual)'
-          isCorrect = null
+          isCorrect = null // null = pendiente de revisión
+          earnedPoints = 0
         }
 
+        // Sumar puntos si es correcto
         if (isCorrect === true) {
           correctCount++
           totalScore += earnedPoints
         }
 
+        console.log(`   📊 Final: isCorrect=${isCorrect}, earnedPoints=${earnedPoints}, totalScore=${totalScore}`)
+
+        // Guardar respuesta individual
         await connection.query(`
           INSERT INTO response_answers (
             response_id, question_id, answer_text,
@@ -247,6 +303,8 @@ export class ResponseController {
         })
       }
 
+      console.log(`\n🎯 FINAL SCORE: ${totalScore}/${maxPossibleScore} (${correctCount} correct)`)
+
       // 6. Calcular porcentaje
       const percentage = maxPossibleScore > 0 
         ? Math.round((totalScore / maxPossibleScore) * 100) 
@@ -254,6 +312,8 @@ export class ResponseController {
       const passed = form.passing_score 
         ? percentage >= parseFloat(form.passing_score) 
         : null
+
+      console.log(`🎯 Percentage: ${percentage}%, Passed: ${passed}`)
 
       // 7. Actualizar respuesta
       await connection.query(`
@@ -325,6 +385,19 @@ export class ResponseController {
       console.log('🎯 Commit exitoso, enviando respuesta...')
 
       await connection.commit()
+
+      try {
+        await NotificationController.notifyNewResponse(
+          form.id,                             // form_id
+          form.title,                          // form_title
+          responseId,                          // response_id
+          respondent_name || respondent_email, // nombre del respondiente
+          form_uuid                            // form_uuid para el link
+        )
+      } catch (notifError) {
+        // No fallar si la notificación falla, solo loggear
+        console.error('Error al crear notificación:', notifError)
+      }
 
       // 9. Respuesta
       const response = {

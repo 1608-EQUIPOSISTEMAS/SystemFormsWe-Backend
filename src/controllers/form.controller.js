@@ -573,6 +573,236 @@ export class FormController {
     }
   }
 
+  static async update(req, reply) {
+    const { uuid } = req.params
+    const userId = req.user?.id
+    const { 
+      title,
+      description,
+      settings = {},
+      questions = []
+    } = req.body
+
+    const connection = await pool.getConnection()
+    
+    try {
+      await connection.beginTransaction()
+
+      // 1. Verificar que el formulario existe y pertenece al usuario
+      const [forms] = await connection.query(
+        'SELECT id, form_type FROM forms WHERE uuid = ? AND created_by = ?',
+        [uuid, userId]
+      )
+
+      if (forms.length === 0) {
+        await connection.rollback()
+        return reply.code(404).send({ ok: false, error: 'Formulario no encontrado' })
+      }
+
+      const formId = forms[0].id
+      const formType = forms[0].form_type
+
+      // 2. Actualizar datos del formulario
+      const formFields = {
+        title: title?.trim(),
+        description: description || null,
+        is_active: settings.is_active !== undefined ? (settings.is_active ? 1 : 0) : undefined,
+        is_public: settings.is_public !== undefined ? (settings.is_public ? 1 : 0) : undefined,
+        requires_login: settings.requires_login !== undefined ? (settings.requires_login ? 1 : 0) : undefined,
+        available_from: settings.available_from || null,
+        available_until: settings.available_until || null,
+        time_limit_minutes: settings.time_limit_minutes || null,
+        allow_multiple_responses: settings.allow_multiple_responses !== undefined ? (settings.allow_multiple_responses ? 1 : 0) : undefined,
+        show_progress_bar: settings.show_progress_bar !== undefined ? (settings.show_progress_bar ? 1 : 0) : undefined,
+        shuffle_questions: settings.shuffle_questions !== undefined ? (settings.shuffle_questions ? 1 : 0) : undefined,
+        passing_score: settings.passing_score || null,
+        show_score_after_submit: settings.show_score_after_submit !== undefined ? (settings.show_score_after_submit ? 1 : 0) : undefined,
+        show_correct_answers: settings.show_correct_answers !== undefined ? (settings.show_correct_answers ? 1 : 0) : undefined,
+        welcome_message: settings.welcome_message || null,
+        submit_message: settings.submit_message || null
+      }
+
+      // Construir query de actualización
+      const setClauses = []
+      const values = []
+
+      for (const [field, value] of Object.entries(formFields)) {
+        if (value !== undefined) {
+          setClauses.push(`${field} = ?`)
+          values.push(value)
+        }
+      }
+
+      if (setClauses.length > 0) {
+        values.push(formId)
+        await connection.query(
+          `UPDATE forms SET ${setClauses.join(', ')}, updated_at = NOW() WHERE id = ?`,
+          values
+        )
+      }
+
+      // 3. Procesar preguntas
+      if (questions.length > 0) {
+        // Obtener IDs de preguntas existentes
+        const [existingQuestions] = await connection.query(
+          'SELECT id FROM questions WHERE form_id = ?',
+          [formId]
+        )
+        const existingIds = existingQuestions.map(q => q.id)
+        const incomingIds = questions.filter(q => q.id).map(q => q.id)
+        
+        // Eliminar preguntas que ya no existen
+        const toDelete = existingIds.filter(id => !incomingIds.includes(id))
+        if (toDelete.length > 0) {
+          // Primero eliminar opciones
+          await connection.query(
+            'DELETE FROM question_options WHERE question_id IN (?)',
+            [toDelete]
+          )
+          // Luego eliminar preguntas
+          await connection.query(
+            'DELETE FROM questions WHERE id IN (?)',
+            [toDelete]
+          )
+        }
+
+        // Procesar cada pregunta
+        for (let i = 0; i < questions.length; i++) {
+          const q = questions[i]
+          let questionId = q.id
+
+          if (questionId) {
+            // Actualizar pregunta existente
+            await connection.query(`
+              UPDATE questions SET
+                question_text = ?,
+                help_text = ?,
+                placeholder = ?,
+                is_required = ?,
+                display_order = ?,
+                points = ?,
+                validation_rules = ?,
+                config = ?,
+                updated_at = NOW()
+              WHERE id = ? AND form_id = ?
+            `, [
+              q.question_text,
+              q.help_text || null,
+              q.placeholder || null,
+              q.is_required ? 1 : 0,
+              i,
+              q.points || 0,
+              q.validation_rules ? JSON.stringify(q.validation_rules) : null,
+              q.config ? JSON.stringify(q.config) : null,
+              questionId,
+              formId
+            ])
+          } else {
+            // Crear nueva pregunta
+            const [result] = await connection.query(`
+              INSERT INTO questions (
+                form_id, question_type_id, question_text, help_text,
+                placeholder, is_required, display_order, points,
+                validation_rules, config
+              ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `, [
+              formId,
+              q.question_type_id,
+              q.question_text,
+              q.help_text || null,
+              q.placeholder || null,
+              q.is_required ? 1 : 0,
+              i,
+              q.points || 0,
+              q.validation_rules ? JSON.stringify(q.validation_rules) : null,
+              q.config ? JSON.stringify(q.config) : null
+            ])
+            questionId = result.insertId
+          }
+
+          // 4. Procesar opciones si la pregunta las tiene
+          if (q.has_options && q.options?.length > 0) {
+            // Obtener opciones existentes
+            const [existingOptions] = await connection.query(
+              'SELECT id FROM question_options WHERE question_id = ?',
+              [questionId]
+            )
+            const existingOptIds = existingOptions.map(o => o.id)
+            const incomingOptIds = q.options.filter(o => o.id).map(o => o.id)
+            
+            // Eliminar opciones que ya no existen
+            const optsToDelete = existingOptIds.filter(id => !incomingOptIds.includes(id))
+            if (optsToDelete.length > 0) {
+              await connection.query(
+                'DELETE FROM question_options WHERE id IN (?)',
+                [optsToDelete]
+              )
+            }
+
+            // Procesar cada opción
+            for (let j = 0; j < q.options.length; j++) {
+              const opt = q.options[j]
+              
+              if (opt.id && !opt.temp_id?.startsWith('opt_')) {
+                // Actualizar opción existente
+                await connection.query(`
+                  UPDATE question_options SET
+                    option_text = ?,
+                    option_value = ?,
+                    display_order = ?,
+                    is_correct = ?,
+                    points = ?
+                  WHERE id = ? AND question_id = ?
+                `, [
+                  opt.option_text,
+                  opt.option_value || opt.option_text,
+                  j,
+                  opt.is_correct ? 1 : 0,
+                  opt.points || 0,
+                  opt.id,
+                  questionId
+                ])
+              } else {
+                // Crear nueva opción
+                await connection.query(`
+                  INSERT INTO question_options (
+                    question_id, option_text, option_value,
+                    display_order, is_correct, points
+                  ) VALUES (?, ?, ?, ?, ?, ?)
+                `, [
+                  questionId,
+                  opt.option_text,
+                  opt.option_value || opt.option_text,
+                  j,
+                  opt.is_correct ? 1 : 0,
+                  opt.points || 0
+                ])
+              }
+            }
+          }
+        }
+      }
+
+      await connection.commit()
+
+      return reply.send({
+        ok: true,
+        message: 'Formulario actualizado correctamente'
+      })
+
+    } catch (error) {
+      await connection.rollback()
+      req.log.error(error)
+      return reply.code(500).send({ 
+        ok: false, 
+        error: 'Error al actualizar formulario' 
+      })
+    } finally {
+      connection.release()
+    }
+  }
+
+
   // ═══════════════════════════════════════
   // OBTENER ESTADÍSTICAS
   // ═══════════════════════════════════════
