@@ -103,7 +103,7 @@ class OdooService {
     if (!result.result || result.result.length === 0) {
       return { 
         ok: false, 
-        error: 'No estás registrado en WE Online. Por favor regístrate primero.',
+        error: 'No estás registrado en el campus Virtual. Comunicarse con el area de Finanzas: 943 882 766',
         code: 'NOT_REGISTERED'
       }
     }
