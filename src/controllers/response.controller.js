@@ -76,7 +76,7 @@ export class ResponseController {
       odoo_partner_id,
       odoo_student_names,
       odoo_student_surnames,
-      questions_shown // NUEVO: Array de IDs de preguntas mostradas
+      questions_shown
     } = req.body
 
     const connection = await pool.getConnection()
@@ -120,7 +120,7 @@ export class ResponseController {
       
       const responseId = responseResult.insertId
 
-      // 3. Obtener preguntas - SOLO las mostradas si hay banco de preguntas
+      // 3. Obtener preguntas
       let questionsQuery = `
         SELECT q.id, q.question_text, q.points, q.question_type_id,
               qt.code as type_code
@@ -130,7 +130,6 @@ export class ResponseController {
       `
       let queryParams = [form.id]
 
-      // Si hay preguntas mostradas específicas, filtrar solo esas
       if (questions_shown && questions_shown.length > 0) {
         questionsQuery += ` AND q.id IN (?)`
         queryParams.push(questions_shown)
@@ -170,7 +169,7 @@ export class ResponseController {
 
       for (const answer of answers) {
         const question = questionMap.get(answer.question_id)
-        if (!question) continue // Ignorar respuestas de preguntas no mostradas
+        if (!question) continue
 
         const questionPoints = parseFloat(question.points) || 1
         maxPossibleScore += questionPoints
@@ -231,20 +230,17 @@ export class ResponseController {
             }
           }
         } else {
-          // TEXT, TEXTAREA, NUMBER, etc.
           answerText = String(answer.answer_value || '')
         }
 
         totalScore += pointsEarned
 
-        // Guardar respuesta
         await connection.query(`
           INSERT INTO response_answers (
             response_id, question_id, answer_text, is_correct, points_earned
           ) VALUES (?, ?, ?, ?, ?)
         `, [responseId, question.id, answerText, isCorrect, pointsEarned])
 
-        // Agregar a detalles
         details.push({
           question_id: question.id,
           question_text: question.question_text,
@@ -273,25 +269,60 @@ export class ResponseController {
         WHERE id = ?
       `, [totalScore, maxPossibleScore, percentage, passed ? 1 : 0, time_spent, responseId])
 
-      // 8. Generar certificado Odoo si aplica
-let odooResult = null
+      // ✅ COMMIT Y LIBERAR CONEXIÓN ANTES DE RESPONDER
+      await connection.commit()
+      connection.release()
+const submittedAt = new Date().toISOString() // ✅ Capturar la fecha del submit
 
-    // Verificar TODAS las condiciones necesarias
-    console.log('🎯 Verificando condiciones para certificación:')
-    console.log('   - isExam:', isExam)
-    console.log('   - passed:', passed)
-    console.log('   - requires_odoo_validation:', form.requires_odoo_validation)
-    console.log('   - odoo_partner_id:', odoo_partner_id)
-    console.log('   - odoo_course_name:', form.odoo_course_name)
+      // 8. Preparar respuesta
+const response = {
+  ok: true,
+  data: {
+    response_uuid: responseUuid,
+    submitted: true,
+    exam_title: form.title,
+    certificate_processing: false,
+    submitted_at: submittedAt // ✅ AGREGAR ESTO
+  }
+}
 
-    if (isExam && passed && form.requires_odoo_validation && odoo_partner_id && form.odoo_course_name) {
-      try {
-        console.log('🎯 Iniciando proceso de certificación...')
-        
-        // Importar el servicio de Odoo
-        const { odooService } = await import('../services/odoo.service.js')
-        
-        const certResult = await odooService.certifyStudent(
+if (isExam && form.show_score_after_submit) {
+  response.data.score = percentage
+  response.data.passed = passed
+  response.data.correct_count = correctCount
+  response.data.total_questions = questions.length
+  response.data.total_score = totalScore
+  response.data.max_score = maxPossibleScore
+  response.data.passing_score = form.passing_score
+  response.data.time_spent = time_spent
+  response.data.submitted_at = submittedAt // ✅ ASEGURAR QUE ESTÉ AQUÍ TAMBIÉN
+
+  if (form.show_correct_answers) {
+    response.data.details = details
+  }
+}
+
+      // ⚡ VERIFICAR SI DEBE CERTIFICAR (para mostrar mensaje)
+      const shouldCertify = isExam && 
+                           passed && 
+                           form.requires_odoo_validation && 
+                           odoo_partner_id && 
+                           form.odoo_course_name
+
+      if (shouldCertify) {
+        response.data.certificate_processing = true
+        response.data.odoo = {
+          message: '🎓 Tu certificado está siendo generado y estará disponible en unos momentos...'
+        }
+      }
+
+      // ✅ ENVIAR RESPUESTA INMEDIATAMENTE AL CLIENTE
+      reply.send(response)
+
+      // 🔄 PROCESO ASÍNCRONO EN SEGUNDO PLANO (NO ESPERA)
+      if (shouldCertify) {
+        processCertificationAsync(
+          responseId,
           {
             partner_id: odoo_partner_id,
             names: odoo_student_names || respondent_name || '',
@@ -301,88 +332,16 @@ let odooResult = null
             course_name: form.odoo_course_name,
             final_score: totalScore,
             completion_date: new Date().toISOString()
-          }
+          },
+          req.log
         )
-
-        console.log('🎯 Resultado certificación:', certResult.ok ? 'OK' : 'FAIL')
-
-        if (certResult.ok) {
-          console.log('🎯 Guardando certificado en BD...')
-          
-          await connection.query(`
-            UPDATE form_responses SET
-              odoo_certificate_id = ?,
-              odoo_certificate_pdf = ?
-            WHERE id = ?
-          `, [certResult.certificate.id, certResult.certificate.pdf_url, responseId])
-
-          console.log('🎯 Certificado guardado exitosamente')
-
-          odooResult = {
-            certificate_id: certResult.certificate.id,
-            pdf_url: certResult.certificate.pdf_url,
-            message: '¡Certificado generado!'
-          }
-        } else {
-          console.error('❌ Error certificando en Odoo:', certResult.error)
-          odooResult = {
-            error: true,
-            message: 'Tu respuesta fue guardada pero hubo un error generando el certificado: ' + certResult.error
-          }
-        }
-      } catch (odooError) {
-        console.error('🎯 Odoo certification error:', odooError.message)
-        odooResult = { 
-          error: true, 
-          message: 'Error al generar certificado: ' + odooError.message 
-        }
       }
-    } else {
-      console.log('⚠️ No se genera certificado - condiciones no cumplidas')
-      if (!form.odoo_course_name) {
-        console.log('   ⚠️ Falta configurar odoo_course_name en el formulario')
-      }
-    }
-
-      await connection.commit()
-
-      // 9. Respuesta
-      const response = {
-        ok: true,
-        data: {
-          response_uuid: responseUuid,
-          submitted: true,
-          exam_title: form.title
-        }
-      }
-
-      if (isExam && form.show_score_after_submit) {
-        response.data.score = percentage
-        response.data.passed = passed
-        response.data.correct_count = correctCount
-        response.data.total_questions = questions.length
-        response.data.total_score = totalScore
-        response.data.max_score = maxPossibleScore
-        response.data.passing_score = form.passing_score
-        response.data.time_spent = time_spent
-
-        if (form.show_correct_answers) {
-          response.data.details = details
-        }
-
-        if (odooResult) {
-          response.data.odoo = odooResult
-        }
-      }
-
-      return reply.send(response)
 
     } catch (error) {
       await connection.rollback()
+      connection.release()
       req.log.error(error)
       return reply.code(500).send({ ok: false, error: 'Error al enviar respuesta' })
-    } finally {
-      connection.release()
     }
   }
 
@@ -408,7 +367,6 @@ let odooResult = null
 
         const response = responses[0]
 
-        // Obtener respuestas individuales
         const [answers] = await connection.query(`
           SELECT ra.*, q.question_text
           FROM response_answers ra
@@ -456,14 +414,12 @@ let odooResult = null
           params.push(status)
         }
 
-        // Count
         const [countResult] = await connection.query(`
           SELECT COUNT(*) as total
           FROM form_responses r
           WHERE ${whereClause}
         `, params)
 
-        // Data
         const offset = (page - 1) * limit
         const [responses] = await connection.query(`
           SELECT r.*, f.title as form_title, f.form_type
@@ -526,7 +482,7 @@ let odooResult = null
   }
 
   // ═══════════════════════════════════════
-  // OBTENER RESULTADO (para pantalla de resultados)
+  // OBTENER RESULTADO
   // ═══════════════════════════════════════
   static async getResult(req, reply) {
     const { response_uuid } = req.params
@@ -579,6 +535,9 @@ let odooResult = null
           }
         }
 
+        // ⚡ Verificar si el certificado ya está disponible
+        const certificateReady = !!response.odoo_certificate_id
+
         return reply.send({
           ok: true,
           data: {
@@ -593,10 +552,11 @@ let odooResult = null
             passing_score: response.passing_score,
             submitted_at: response.submitted_at,
             details: response.show_correct_answers ? details : [],
-            odoo: response.odoo_certificate_id ? {
+            odoo: certificateReady ? {
               certificate_id: response.odoo_certificate_id,
               pdf_url: response.odoo_certificate_pdf
-            } : null
+            } : null,
+            certificate_processing: !certificateReady && response.passed
           }
         })
 
@@ -610,46 +570,273 @@ let odooResult = null
   }
 
   static async getCertificatePdf(req, reply) {
-  const { responseUuid } = req.params
+    const { responseUuid } = req.params
+
+    try {
+      const connection = await pool.getConnection()
+      try {
+        const [responses] = await connection.query(`
+          SELECT odoo_certificate_id, odoo_certificate_pdf
+          FROM form_responses
+          WHERE response_uuid = ?
+        `, [responseUuid])
+
+        if (!responses.length || !responses[0].odoo_certificate_id) {
+          return reply.code(404).send({ ok: false, error: 'Certificado no encontrado' })
+        }
+
+        const { odoo_certificate_id } = responses[0]
+
+        const { odooService } = await import('../services/odoo.service.js')
+        const pdfBase64 = await odooService.getCertificatePdfBase64(odoo_certificate_id)
+
+        if (!pdfBase64) {
+          return reply.code(404).send({ ok: false, error: 'PDF no disponible' })
+        }
+
+        const pdfBuffer = Buffer.from(pdfBase64, 'base64')
+        
+        reply.header('Content-Type', 'application/pdf')
+        reply.header('Content-Disposition', `inline; filename="certificado-${responseUuid}.pdf"`)
+        
+        return reply.send(pdfBuffer)
+
+      } finally {
+        connection.release()
+      }
+    } catch (error) {
+      req.log.error(error)
+      return reply.code(500).send({ ok: false, error: 'Error al obtener certificado' })
+    }
+  }
+
+static async checkPreviousResponse(req, reply) {
+  const { form_uuid, respondent_email } = req.query
+
+  console.log('🔍 checkPreviousResponse llamado:', { form_uuid, respondent_email })
+
+  if (!form_uuid || !respondent_email) {
+    return reply.code(400).send({ 
+      ok: false, 
+      error: 'form_uuid y respondent_email son requeridos' 
+    })
+  }
 
   try {
     const connection = await pool.getConnection()
     try {
-      // Buscar el certificado
-      const [responses] = await connection.query(`
-        SELECT odoo_certificate_id, odoo_certificate_pdf
+      // 1. Obtener el formulario
+      const [forms] = await connection.query(
+        `SELECT id, title, passing_score, allow_multiple_responses, 
+                show_correct_answers, form_type, use_question_bank, questions_to_show
+        FROM forms WHERE uuid = ? AND is_active = 1`,
+        [form_uuid]
+      )
+
+      if (!forms.length) {
+        return reply.code(404).send({ ok: false, error: 'Formulario no encontrado' })
+      }
+
+      const form = forms[0]
+
+      // 2. Buscar respuesta previa del estudiante
+      const [responses] = await connection.query(
+        `SELECT 
+          id,
+          response_uuid,
+          total_score,
+          max_possible_score,
+          percentage_score,
+          passed,
+          submitted_at,
+          odoo_certificate_id,
+          odoo_certificate_pdf,
+          questions_shown
         FROM form_responses
-        WHERE response_uuid = ?
-      `, [responseUuid])
+        WHERE form_id = ? 
+          AND respondent_email = ?
+          AND status = 'SUBMITTED'
+        ORDER BY submitted_at DESC
+        LIMIT 1`,
+        [form.id, respondent_email]
+      )
 
-      if (!responses.length || !responses[0].odoo_certificate_id) {
-        return reply.code(404).send({ ok: false, error: 'Certificado no encontrado' })
+      // 3. Si NO tiene respuesta previa
+      if (!responses.length) {
+        console.log('✅ No tiene respuesta previa')
+        return reply.send({
+          ok: true,
+          has_previous_response: false,
+          can_take_exam: true
+        })
       }
 
-      const { odoo_certificate_id } = responses[0]
+      const response = responses[0]
+      console.log('📝 Response ID encontrado:', response.id)
 
-      // Obtener PDF de Odoo
-      const { odooService } = await import('../services/odoo.service.js')
-      const pdfBase64 = await odooService.getCertificatePdfBase64(odoo_certificate_id)
+      // ═══════════════════════════════════════
+      // 4. CALCULAR correct_count y total_questions
+      // ═══════════════════════════════════════
+      let correctCount = 0
+      let totalQuestions = 0
 
-      if (!pdfBase64) {
-        return reply.code(404).send({ ok: false, error: 'PDF no disponible' })
+      // Primero intentar desde response_answers
+      const [statsResult] = await connection.query(`
+        SELECT 
+          COUNT(*) as total_questions,
+          COALESCE(SUM(CASE WHEN is_correct = 1 THEN 1 ELSE 0 END), 0) as correct_count
+        FROM response_answers
+        WHERE response_id = ?
+      `, [response.id])
+
+      const stats = statsResult[0] || { total_questions: 0, correct_count: 0 }
+      
+      // Si hay datos en response_answers, usarlos
+      if (parseInt(stats.total_questions) > 0) {
+        correctCount = parseInt(stats.correct_count) || 0
+        totalQuestions = parseInt(stats.total_questions) || 0
+        console.log('📊 Stats desde response_answers:', { correctCount, totalQuestions })
+      } else {
+        // ⚠️ FALLBACK: Calcular desde form_responses y questions
+        console.log('⚠️ No hay datos en response_answers, calculando fallback...')
+        
+        // 1. Obtener total de preguntas del formulario
+        const [questionCount] = await connection.query(
+          `SELECT COUNT(*) as count, SUM(points) as total_points 
+           FROM questions WHERE form_id = ? AND is_active = 1`,
+          [form.id]
+        )
+        
+        const formQuestionCount = parseInt(questionCount[0]?.count) || 0
+        const formTotalPoints = parseFloat(questionCount[0]?.total_points) || 0
+        
+        // 2. Determinar totalQuestions
+        if (form.use_question_bank && form.questions_to_show) {
+          totalQuestions = parseInt(form.questions_to_show)
+        } else {
+          totalQuestions = formQuestionCount
+        }
+        
+        // 3. Calcular correctCount basado en puntuación
+        const totalScore = parseFloat(response.total_score) || 0
+        const maxScore = parseFloat(response.max_possible_score) || 0
+        const percentage = parseFloat(response.percentage_score) || 0
+        
+        console.log('📊 Datos disponibles:', { totalScore, maxScore, percentage, totalQuestions })
+        
+        if (totalQuestions > 0) {
+          // Si tiene max_score, calcular puntos por pregunta
+          if (maxScore > 0) {
+            const pointsPerQuestion = maxScore / totalQuestions
+            correctCount = Math.round(totalScore / pointsPerQuestion)
+          } else if (percentage > 0) {
+            // Fallback al porcentaje
+            correctCount = Math.round((percentage / 100) * totalQuestions)
+          }
+        }
+        
+        console.log('📊 Stats calculados (fallback):', { correctCount, totalQuestions })
       }
 
-      // Enviar PDF
-      const pdfBuffer = Buffer.from(pdfBase64, 'base64')
-      
-      reply.header('Content-Type', 'application/pdf')
-      reply.header('Content-Disposition', `inline; filename="certificado-${responseUuid}.pdf"`)
-      
-      return reply.send(pdfBuffer)
+      // 5. Contar intentos previos
+      const [attemptCount] = await connection.query(
+        `SELECT COUNT(*) as attempts FROM form_responses 
+         WHERE form_id = ? AND respondent_email = ? AND status = 'SUBMITTED'`,
+        [form.id, respondent_email]
+      )
+      const attemptNumber = attemptCount[0]?.attempts || 1
+
+      // 6. Si APROBÓ
+      if (response.passed) {
+        console.log('✅ APROBÓ - correct_count:', correctCount, 'total:', totalQuestions)
+        return reply.send({
+          ok: true,
+          has_previous_response: true,
+          can_take_exam: false,
+          status: 'PASSED',
+          attempt_number: attemptNumber,
+          data: {
+            response_uuid: response.response_uuid,
+            score: response.percentage_score,
+            total_score: response.total_score,
+            max_score: response.max_possible_score,
+            passing_score: form.passing_score,
+            submitted_at: response.submitted_at,
+            certificate_id: response.odoo_certificate_id,
+            certificate_pdf: response.odoo_certificate_pdf,
+            exam_title: form.title,
+            correct_count: correctCount,
+            total_questions: totalQuestions
+          }
+        })
+      }
+
+      // 7. Si REPROBÓ
+      console.log('❌ REPROBÓ - correct_count:', correctCount, 'total:', totalQuestions)
+      return reply.send({
+        ok: true,
+        has_previous_response: true,
+        can_take_exam: attemptNumber < 2,
+        status: 'FAILED',
+        attempt_number: attemptNumber,
+        data: {
+          response_uuid: response.response_uuid,
+          score: response.percentage_score,
+          total_score: response.total_score,
+          max_score: response.max_possible_score,
+          passing_score: form.passing_score,
+          submitted_at: response.submitted_at,
+          exam_title: form.title,
+          allow_retry: attemptNumber < 2,
+          correct_count: correctCount,
+          total_questions: totalQuestions
+        }
+      })
 
     } finally {
       connection.release()
     }
   } catch (error) {
     req.log.error(error)
-    return reply.code(500).send({ ok: false, error: 'Error al obtener certificado' })
+    console.error('❌ Error en checkPreviousResponse:', error)
+    return reply.code(500).send({ 
+      ok: false, 
+      error: 'Error al verificar respuesta previa' 
+    })
   }
 }
+}
+
+// ═══════════════════════════════════════
+// 🔄 FUNCIÓN ASÍNCRONA PARA CERTIFICACIÓN
+// ═══════════════════════════════════════
+async function processCertificationAsync(responseId, studentData, examData, logger) {
+  let connection = null
+  
+  try {
+    logger.info(`🎯 [Async] Iniciando certificación para response_id: ${responseId}`)
+    
+    const certResult = await odooService.certifyStudent(studentData, examData)
+    
+    if (certResult.ok) {
+      logger.info(`✅ [Async] Certificado generado: ${certResult.certificate.id}`)
+      
+      connection = await pool.getConnection()
+      
+      await connection.query(`
+        UPDATE form_responses SET
+          odoo_certificate_id = ?,
+          odoo_certificate_pdf = ?
+        WHERE id = ?
+      `, [certResult.certificate.id, certResult.certificate.pdf_url, responseId])
+      
+      logger.info(`✅ [Async] Certificado guardado en BD para response_id: ${responseId}`)
+    } else {
+      logger.error(`❌ [Async] Error generando certificado: ${certResult.error}`)
+    }
+  } catch (error) {
+    logger.error(`❌ [Async] Error en proceso de certificación:`, error)
+  } finally {
+    if (connection) connection.release()
+  }
 }

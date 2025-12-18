@@ -1116,151 +1116,151 @@ static async getByUuid(req, reply) {
   // ═══════════════════════════════════════
   // OBTENER FORMULARIO PÚBLICO (sin auth)
   // ═══════════════════════════════════════
-static async getPublicForm(req, reply) {
-  const { uuid } = req.params
+    static async getPublicForm(req, reply) {
+      const { uuid } = req.params
 
-  try {
-    const connection = await pool.getConnection()
-    try {
-      // 1. Obtener formulario CON campos de banco de preguntas
-      const [forms] = await connection.query(`
-        SELECT 
-          f.id, f.uuid, f.title, f.description, f.form_type,
-          f.requires_login, f.show_progress_bar, f.shuffle_questions,
-          f.welcome_message, f.submit_message, f.time_limit_minutes,
-          f.available_from, f.available_until, f.is_active,
-          f.passing_score,
-          f.requires_odoo_validation,
-          f.use_question_bank,
-          f.questions_to_show
-        FROM forms f
-        WHERE f.uuid = ?
-      `, [uuid])
+      try {
+        const connection = await pool.getConnection()
+        try {
+          // 1. Obtener formulario CON campos de banco de preguntas
+          const [forms] = await connection.query(`
+            SELECT 
+              f.id, f.uuid, f.title, f.description, f.form_type,
+              f.requires_login, f.show_progress_bar, f.shuffle_questions,
+              f.welcome_message, f.submit_message, f.time_limit_minutes,
+              f.available_from, f.available_until, f.is_active,
+              f.passing_score,
+              f.requires_odoo_validation,
+              f.use_question_bank,
+              f.questions_to_show
+            FROM forms f
+            WHERE f.uuid = ?
+          `, [uuid])
 
-      if (forms.length === 0) {
-        return reply.code(404).send({ ok: false, error: 'Formulario no encontrado' })
-      }
+          if (forms.length === 0) {
+            return reply.code(404).send({ ok: false, error: 'Formulario no encontrado' })
+          }
 
-      const form = forms[0]
+          const form = forms[0]
 
-      if (!form.is_active) {
-        return reply.code(403).send({ ok: false, error: 'Este formulario no está disponible actualmente' })
-      }
+          if (!form.is_active) {
+            return reply.code(403).send({ ok: false, error: 'Este formulario no está disponible actualmente' })
+          }
 
-      const now = new Date()
-      if (form.available_from && new Date(form.available_from) > now) {
-        return reply.code(403).send({ ok: false, error: 'Este formulario aún no está disponible' })
-      }
-      if (form.available_until && new Date(form.available_until) < now) {
-        return reply.code(403).send({ ok: false, error: 'Este formulario ya no está disponible' })
-      }
+          const now = new Date()
+          if (form.available_from && new Date(form.available_from) > now) {
+            return reply.code(403).send({ ok: false, error: 'Este formulario aún no está disponible' })
+          }
+          if (form.available_until && new Date(form.available_until) < now) {
+            return reply.code(403).send({ ok: false, error: 'Este formulario ya no está disponible' })
+          }
 
-      // 2. Obtener TODAS las preguntas activas CON PUNTOS
-      const [allQuestions] = await connection.query(`
-        SELECT 
-          q.id, q.question_text, q.help_text, q.placeholder,
-          q.is_required, q.display_order, q.config,
-          q.points,
-          qt.code as type_code, qt.name as type_name, qt.has_options
-        FROM questions q
-        JOIN question_types qt ON q.question_type_id = qt.id
-        WHERE q.form_id = ? AND q.is_active = 1
-        ORDER BY q.display_order
-      `, [form.id])
+          // 2. Obtener TODAS las preguntas activas CON PUNTOS
+          const [allQuestions] = await connection.query(`
+            SELECT 
+              q.id, q.question_text, q.help_text, q.placeholder,
+              q.is_required, q.display_order, q.config,
+              q.points,
+              qt.code as type_code, qt.name as type_name, qt.has_options
+            FROM questions q
+            JOIN question_types qt ON q.question_type_id = qt.id
+            WHERE q.form_id = ? AND q.is_active = 1
+            ORDER BY q.display_order
+          `, [form.id])
 
-      // 3. Aplicar lógica de banco de preguntas
-      let selectedQuestions = [...allQuestions]
-      
-      if (form.use_question_bank && form.questions_to_show && form.questions_to_show < allQuestions.length) {
-        // Mezclar aleatoriamente usando Fisher-Yates
-        for (let i = selectedQuestions.length - 1; i > 0; i--) {
-          const j = Math.floor(Math.random() * (i + 1));
-          [selectedQuestions[i], selectedQuestions[j]] = [selectedQuestions[j], selectedQuestions[i]]
-        }
-        // Tomar solo las primeras N preguntas
-        selectedQuestions = selectedQuestions.slice(0, form.questions_to_show)
-        // Ordenar por display_order para mantener coherencia visual
-        selectedQuestions.sort((a, b) => a.display_order - b.display_order)
-      } else if (form.shuffle_questions) {
-        // Solo mezclar sin limitar cantidad
-        for (let i = selectedQuestions.length - 1; i > 0; i--) {
-          const j = Math.floor(Math.random() * (i + 1));
-          [selectedQuestions[i], selectedQuestions[j]] = [selectedQuestions[j], selectedQuestions[i]]
-        }
-      }
+          // 3. Aplicar lógica de banco de preguntas
+          let selectedQuestions = [...allQuestions]
+          
+          if (form.use_question_bank && form.questions_to_show && form.questions_to_show < allQuestions.length) {
+            // Mezclar aleatoriamente usando Fisher-Yates
+            for (let i = selectedQuestions.length - 1; i > 0; i--) {
+              const j = Math.floor(Math.random() * (i + 1));
+              [selectedQuestions[i], selectedQuestions[j]] = [selectedQuestions[j], selectedQuestions[i]]
+            }
+            // Tomar solo las primeras N preguntas
+            selectedQuestions = selectedQuestions.slice(0, form.questions_to_show)
+            // Ordenar por display_order para mantener coherencia visual
+            selectedQuestions.sort((a, b) => a.display_order - b.display_order)
+          } else if (form.shuffle_questions) {
+            // Solo mezclar sin limitar cantidad
+            for (let i = selectedQuestions.length - 1; i > 0; i--) {
+              const j = Math.floor(Math.random() * (i + 1));
+              [selectedQuestions[i], selectedQuestions[j]] = [selectedQuestions[j], selectedQuestions[i]]
+            }
+          }
 
-      // 4. Obtener opciones SOLO para las preguntas seleccionadas
-      const questionIds = selectedQuestions.map(q => q.id)
-      let options = []
-      
-      if (questionIds.length > 0) {
-        const [opts] = await connection.query(`
-          SELECT question_id, id, option_text, option_value, display_order
-          FROM question_options
-          WHERE question_id IN (?) AND is_active = 1
-          ORDER BY display_order
-        `, [questionIds])
-        options = opts
-      }
+          // 4. Obtener opciones SOLO para las preguntas seleccionadas
+          const questionIds = selectedQuestions.map(q => q.id)
+          let options = []
+          
+          if (questionIds.length > 0) {
+            const [opts] = await connection.query(`
+              SELECT question_id, id, option_text, option_value, display_order
+              FROM question_options
+              WHERE question_id IN (?) AND is_active = 1
+              ORDER BY display_order
+            `, [questionIds])
+            options = opts
+          }
 
-      // 5. Mapear preguntas con opciones
-      const questionsWithOptions = selectedQuestions.map(q => ({
-        id: q.id,
-        question_text: q.question_text,
-        help_text: q.help_text,
-        placeholder: q.placeholder,
-        is_required: !!q.is_required,
-        display_order: q.display_order,
-        points: q.points || 1, // Fallback a 1 punto si no tiene
-        type: q.type_code,
-        type_code: q.type_code,
-        type_name: q.type_name,
-        has_options: !!q.has_options,
-        config: safeJsonParse(q.config),
-        options: options
-          .filter(o => o.question_id === q.id)
-          .map(o => ({
-            id: o.id,
-            option_text: o.option_text,
-            option_value: o.option_value
+          // 5. Mapear preguntas con opciones
+          const questionsWithOptions = selectedQuestions.map(q => ({
+            id: q.id,
+            question_text: q.question_text,
+            help_text: q.help_text,
+            placeholder: q.placeholder,
+            is_required: !!q.is_required,
+            display_order: q.display_order,
+            points: q.points || 1, // Fallback a 1 punto si no tiene
+            type: q.type_code,
+            type_code: q.type_code,
+            type_name: q.type_name,
+            has_options: !!q.has_options,
+            config: safeJsonParse(q.config),
+            options: options
+              .filter(o => o.question_id === q.id)
+              .map(o => ({
+                id: o.id,
+                option_text: o.option_text,
+                option_value: o.option_value
+              }))
           }))
-      }))
 
-      // 6. Calcular puntaje máximo basado en preguntas SELECCIONADAS
-      const maxScore = questionsWithOptions.reduce((sum, q) => sum + (q.points || 1), 0)
+          // 6. Calcular puntaje máximo basado en preguntas SELECCIONADAS
+          const maxScore = questionsWithOptions.reduce((sum, q) => sum + (q.points || 1), 0)
 
-      return reply.send({
-        ok: true,
-        data: {
-          form: {
-            uuid: form.uuid,
-            title: form.title,
-            description: form.description,
-            form_type: form.form_type,
-            requires_login: !!form.requires_login,
-            show_progress_bar: !!form.show_progress_bar,
-            shuffle_questions: !!form.shuffle_questions,
-            welcome_message: form.welcome_message,
-            submit_message: form.submit_message,
-            time_limit_minutes: form.time_limit_minutes,
-            passing_score: form.passing_score,
-            requires_odoo_validation: !!form.requires_odoo_validation,
-            use_question_bank: !!form.use_question_bank,
-            questions_to_show: form.questions_to_show,
-            max_score: maxScore // Puntaje máximo calculado
-          },
-          questions: questionsWithOptions
+          return reply.send({
+            ok: true,
+            data: {
+              form: {
+                uuid: form.uuid,
+                title: form.title,
+                description: form.description,
+                form_type: form.form_type,
+                requires_login: !!form.requires_login,
+                show_progress_bar: !!form.show_progress_bar,
+                shuffle_questions: !!form.shuffle_questions,
+                welcome_message: form.welcome_message,
+                submit_message: form.submit_message,
+                time_limit_minutes: form.time_limit_minutes,
+                passing_score: form.passing_score,
+                requires_odoo_validation: !!form.requires_odoo_validation,
+                use_question_bank: !!form.use_question_bank,
+                questions_to_show: form.questions_to_show,
+                max_score: maxScore // Puntaje máximo calculado
+              },
+              questions: questionsWithOptions
+            }
+          })
+
+        } finally {
+          connection.release()
         }
-      })
-
-    } finally {
-      connection.release()
+      } catch (error) {
+        req.log.error(error)
+        return reply.code(500).send({ ok: false, error: 'Error al obtener formulario' })
+      }
     }
-  } catch (error) {
-    req.log.error(error)
-    return reply.code(500).send({ ok: false, error: 'Error al obtener formulario' })
-  }
-}
 
 
   static async getResponseDetail(req, reply) {
