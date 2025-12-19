@@ -374,6 +374,73 @@ class OdooService {
       return { ok: false, error: error.message }
     }
   }
+
+  // ═══════════════════════════════════════
+// VERIFICAR INSCRIPCIÓN EN CURSO
+// ═══════════════════════════════════════
+async checkCourseEnrollment(partnerId, slideChannelId, courseName = null) {
+  if (!slideChannelId && !courseName) {
+    console.log('⚠️ No hay slide_channel_id ni course_name, saltando validación')
+    return { ok: true, enrolled: true, skipped: true }
+  }
+
+  console.log('🔍 Verificando inscripción:', { partnerId, slideChannelId, courseName })
+
+  const allCourses = await this.call('report.slide.channel.progress', 'search_read', [], {
+    domain: [['partner_id', '=', partnerId]],
+    fields: ['channel_id', 'progress'],
+    context: { website_id: 1 },
+    limit: 100
+  })
+
+  if (!allCourses.ok) {
+    return { ok: false, error: 'Error al verificar inscripción en el curso' }
+  }
+
+  // Buscar por ID o por nombre
+  const enrollment = allCourses.result?.find(course => {
+    const courseId = Array.isArray(course.channel_id) ? course.channel_id[0] : course.channel_id
+    const courseNameOdoo = Array.isArray(course.channel_id) ? course.channel_id[1] : ''
+    
+    // Coincide por ID O por nombre (case-insensitive)
+    return courseId === slideChannelId || 
+           (courseName && courseNameOdoo.toLowerCase().includes(courseName.toLowerCase()))
+  })
+
+  if (!enrollment) {
+    console.log('❌ No inscrito. Cursos disponibles:', 
+      allCourses.result?.map(c => `${c.channel_id[0]}: ${c.channel_id[1]}`)
+    )
+    return { 
+      ok: false, 
+      enrolled: false,
+      error: 'No estás inscrito en este curso. Por favor, inscríbete primero en el Campus Virtual.',
+      code: 'NOT_ENROLLED'
+    }
+  }
+
+  console.log('✅ Inscrito en:', enrollment.channel_id)
+  return { ok: true, enrolled: true, progress: enrollment.progress }
+}
+// ═══════════════════════════════════════
+// VALIDAR ESTUDIANTE CON INSCRIPCIÓN
+// ═══════════════════════════════════════
+async validateStudentWithEnrollment(email, slideChannelId = null, courseName = null) {
+  const studentResult = await this.validateStudent(email)
+  if (!studentResult.ok) return studentResult
+
+  if (slideChannelId || courseName) {
+    const enrollmentResult = await this.checkCourseEnrollment(
+      studentResult.student.partner_id, 
+      slideChannelId,
+      courseName  // Pasar también el nombre
+    )
+    if (!enrollmentResult.ok) return enrollmentResult
+    studentResult.student.course_progress = enrollmentResult.progress || 0
+  }
+
+  return studentResult
+}
 }
 
 export const odooService = new OdooService()

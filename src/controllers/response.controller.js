@@ -8,60 +8,67 @@ export class ResponseController {
   // ═══════════════════════════════════════
   // VALIDAR ESTUDIANTE EN ODOO
   // ═══════════════════════════════════════
-  static async validateStudent(req, reply) {
-    const { email, form_uuid } = req.body
+static async validateStudent(req, reply) {
+  const { email, form_uuid } = req.body
 
-    if (!email) {
-      return reply.code(400).send({ ok: false, error: 'Email es requerido' })
-    }
-
-    try {
-      const connection = await pool.getConnection()
-      try {
-        const [forms] = await connection.query(
-          `SELECT id, requires_odoo_validation, odoo_course_name 
-           FROM forms WHERE uuid = ? AND is_active = 1`,
-          [form_uuid]
-        )
-
-        if (!forms.length) {
-          return reply.code(404).send({ ok: false, error: 'Formulario no encontrado' })
-        }
-
-        const form = forms[0]
-
-        if (!form.requires_odoo_validation) {
-          return reply.send({ 
-            ok: true, 
-            validated: false,
-            message: 'Este formulario no requiere validación Odoo'
-          })
-        }
-
-        const result = await odooService.validateStudent(email)
-
-        if (!result.ok) {
-          return reply.code(400).send({
-            ok: false,
-            error: result.error,
-            code: result.code
-          })
-        }
-
-        return reply.send({
-          ok: true,
-          validated: true,
-          student: result.student
-        })
-
-      } finally {
-        connection.release()
-      }
-    } catch (error) {
-      req.log.error(error)
-      return reply.code(500).send({ ok: false, error: 'Error al validar estudiante' })
-    }
+  if (!email) {
+    return reply.code(400).send({ ok: false, error: 'Email es requerido' })
   }
+
+  try {
+    const connection = await pool.getConnection()
+    try {
+      // 1. Obtener formulario CON slide_channel_id
+      const [forms] = await connection.query(
+        `SELECT id, requires_odoo_validation, odoo_course_name, odoo_slide_channel_id 
+         FROM forms WHERE uuid = ? AND is_active = 1`,
+        [form_uuid]
+      )
+
+      if (!forms.length) {
+        return reply.code(404).send({ ok: false, error: 'Formulario no encontrado' })
+      }
+
+      const form = forms[0]
+
+      if (!form.requires_odoo_validation) {
+        return reply.send({ 
+          ok: true, 
+          validated: false,
+          message: 'Este formulario no requiere validación Odoo'
+        })
+      }
+
+      // 2. Validar estudiante + inscripción en curso
+      const result = await odooService.validateStudentWithEnrollment(
+        email,
+        form.odoo_slide_channel_id,
+          form.odoo_course_name  // Agregar esto
+ // Pasar el ID del curso
+      )
+
+      if (!result.ok) {
+        return reply.code(400).send({
+          ok: false,
+          error: result.error,
+          code: result.code
+        })
+      }
+
+      return reply.send({
+        ok: true,
+        validated: true,
+        student: result.student
+      })
+
+    } finally {
+      connection.release()
+    }
+  } catch (error) {
+    req.log.error(error)
+    return reply.code(500).send({ ok: false, error: 'Error al validar estudiante' })
+  }
+}
 
   // ═══════════════════════════════════════
   // ENVIAR RESPUESTA (SUBMIT)
