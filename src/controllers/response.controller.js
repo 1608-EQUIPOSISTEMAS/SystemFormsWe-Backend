@@ -1,5 +1,5 @@
 // src/controllers/response.controller.js
-import { pool } from '../config/database.js'
+import { pool, getConnectionWithRetry } from '../config/database.js'
 import { v4 as uuidv4 } from 'uuid'
 import { odooService } from '../services/odoo.service.js'
 
@@ -491,88 +491,116 @@ if (isExam && form.show_score_after_submit) {
   // ═══════════════════════════════════════
   // OBTENER RESULTADO
   // ═══════════════════════════════════════
-  static async getResult(req, reply) {
+static async getResult(req, reply) {
     const { response_uuid } = req.params
 
+    let connection = null
+
     try {
-      const connection = await pool.getConnection()
-      try {
-        const [responses] = await connection.query(`
-          SELECT 
-            r.*, f.title as exam_title, f.passing_score,
-            f.show_score_after_submit, f.show_correct_answers
-          FROM form_responses r
-          JOIN forms f ON r.form_id = f.id
-          WHERE r.response_uuid = ?
-        `, [response_uuid])
+      // Usar retry para evitar ECONNRESET
+      connection = await getConnectionWithRetry()
 
-        if (!responses.length) {
-          return reply.code(404).send({ ok: false, error: 'Respuesta no encontrada' })
-        }
+      // 1. Obtener la respuesta principal
+      const [responses] = await connection.query(`
+        SELECT 
+          r.id, r.response_uuid, r.total_score, r.max_possible_score,
+          r.percentage_score, r.passed, r.submitted_at, r.status,
+          r.odoo_certificate_id, r.odoo_certificate_pdf,
+          r.respondent_email, r.odoo_student_names, r.odoo_student_surnames,
+          f.title as exam_title, f.passing_score,
+          f.show_score_after_submit, f.show_correct_answers
+        FROM form_responses r
+        JOIN forms f ON r.form_id = f.id
+        WHERE r.response_uuid = ?
+      `, [response_uuid])
 
-        const response = responses[0]
-
-        let details = []
-        if (response.show_correct_answers) {
-          const [answers] = await connection.query(`
-            SELECT 
-              ra.question_id, ra.answer_text, ra.is_correct, 
-              ra.points_earned, q.question_text, q.points as points_possible
-            FROM response_answers ra
-            JOIN questions q ON ra.question_id = q.id
-            WHERE ra.response_id = ?
-            ORDER BY q.display_order
-          `, [response.id])
-
-          for (const ans of answers) {
-            const [correctOpts] = await connection.query(`
-              SELECT option_text FROM question_options
-              WHERE question_id = ? AND is_correct = 1
-            `, [ans.question_id])
-
-            details.push({
-              question_id: ans.question_id,
-              question_text: ans.question_text,
-              user_answer: ans.answer_text,
-              correct_answer: correctOpts.map(o => o.option_text).join(', '),
-              is_correct: !!ans.is_correct,
-              points_earned: ans.points_earned,
-              points_possible: ans.points_possible
-            })
-          }
-        }
-
-        // ⚡ Verificar si el certificado ya está disponible
-        const certificateReady = !!response.odoo_certificate_id
-
-        return reply.send({
-          ok: true,
-          data: {
-            response_uuid: response.response_uuid,
-            exam_title: response.exam_title,
-            score: response.percentage_score,
-            passed: !!response.passed,
-            correct_count: details.filter(d => d.is_correct).length,
-            total_questions: details.length,
-            total_score: response.total_score,
-            max_score: response.max_possible_score,
-            passing_score: response.passing_score,
-            submitted_at: response.submitted_at,
-            details: response.show_correct_answers ? details : [],
-            odoo: certificateReady ? {
-              certificate_id: response.odoo_certificate_id,
-              pdf_url: response.odoo_certificate_pdf
-            } : null,
-            certificate_processing: !certificateReady && response.passed
-          }
-        })
-
-      } finally {
-        connection.release()
+      if (!responses.length) {
+        return reply.code(404).send({ ok: false, error: 'Respuesta no encontrada' })
       }
+
+      const response = responses[0]
+
+      // 2. Obtener respuestas + opciones correctas en UN SOLO query (elimina N+1)
+      let details = []
+      let correctCount = 0
+      let totalQuestions = 0
+
+      const [answersWithCorrect] = await connection.query(`
+        SELECT 
+          ra.question_id,
+          ra.answer_text,
+          ra.is_correct,
+          ra.points_earned,
+          q.question_text,
+          q.points as points_possible,
+          q.display_order,
+          GROUP_CONCAT(
+            CASE WHEN qo.is_correct = 1 THEN qo.option_text END
+            ORDER BY qo.id
+            SEPARATOR ', '
+          ) as correct_answer_text
+        FROM response_answers ra
+        JOIN questions q ON ra.question_id = q.id
+        LEFT JOIN question_options qo ON qo.question_id = q.id
+        WHERE ra.response_id = ?
+        GROUP BY ra.id, ra.question_id, ra.answer_text, ra.is_correct, 
+                 ra.points_earned, q.question_text, q.points, q.display_order
+        ORDER BY q.display_order
+      `, [response.id])
+
+      // Liberar conexión INMEDIATAMENTE después de los queries
+      connection.release()
+      connection = null
+
+      // 3. Procesar resultados (ya sin conexión abierta)
+      totalQuestions = answersWithCorrect.length
+
+      for (const ans of answersWithCorrect) {
+        if (ans.is_correct) correctCount++
+
+        if (response.show_correct_answers) {
+          details.push({
+            question_id: ans.question_id,
+            question_text: ans.question_text,
+            user_answer: ans.answer_text,
+            correct_answer: ans.correct_answer_text || '',
+            is_correct: !!ans.is_correct,
+            points_earned: ans.points_earned,
+            points_possible: ans.points_possible
+          })
+        }
+      }
+
+      // 4. Verificar certificado
+      const certificateReady = !!response.odoo_certificate_id
+
+      return reply.send({
+        ok: true,
+        data: {
+          response_uuid: response.response_uuid,
+          exam_title: response.exam_title,
+          score: response.percentage_score,
+          passed: !!response.passed,
+          correct_count: correctCount,
+          total_questions: totalQuestions,
+          total_score: response.total_score,
+          max_score: response.max_possible_score,
+          passing_score: response.passing_score,
+          submitted_at: response.submitted_at,
+          details: response.show_correct_answers ? details : [],
+          odoo: certificateReady ? {
+            certificate_id: response.odoo_certificate_id,
+            pdf_url: response.odoo_certificate_pdf
+          } : null,
+          certificate_processing: !certificateReady && !!response.passed
+        }
+      })
+
     } catch (error) {
       req.log.error(error)
       return reply.code(500).send({ ok: false, error: 'Error al obtener resultado' })
+    } finally {
+      if (connection) connection.release()
     }
   }
 

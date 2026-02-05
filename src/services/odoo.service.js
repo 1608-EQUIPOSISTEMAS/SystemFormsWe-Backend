@@ -139,19 +139,42 @@ class OdooService {
   // OBTENER INFO DEL CURSO
   // ═══════════════════════════════════════
   async getCourseInfo(courseName) {
+    console.log('🔍 Buscando curso en Odoo:', courseName)
+    
+    // Usar fields: [] para traer TODOS los campos (evita error si campos custom no existen)
     const result = await this.call('slide.channel', 'search_read', [], {
       domain: [['name', 'ilike', courseName]],
-      fields: ['id', 'name', 'academic_hours', 'course_type'],
+      fields: [],  // ← Traer todo, igual que en Postman
       limit: 1
     })
 
-    if (!result.ok) return result
+    if (!result.ok) {
+      console.error('❌ Error buscando curso:', result.error)
+      return result
+    }
 
     if (!result.result || result.result.length === 0) {
+      console.warn('⚠️ Curso no encontrado:', courseName)
       return { ok: false, error: `Curso "${courseName}" no encontrado en Odoo` }
     }
 
-    return { ok: true, course: result.result[0] }
+    const course = result.result[0]
+    console.log('✅ Curso encontrado:', {
+      id: course.id,
+      name: course.name,
+      academic_hours: course.academic_hours,
+      course_type: course.course_type
+    })
+
+    return { 
+      ok: true, 
+      course: {
+        id: course.id,                              // ← Este es el slide_channel_id
+        name: course.name || courseName,
+        academic_hours: course.academic_hours || 24, // Fallback si no existe el campo
+        course_type: course.course_type || 'online_ind'
+      }
+    }
   }
 
   // ═══════════════════════════════════════
