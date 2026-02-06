@@ -1,9 +1,9 @@
 // src/controllers/linkedin.controller.js
 import { odooService } from '../services/odoo.service.js'
-import puppeteer from 'puppeteer'
 
 const LINKEDIN_CLIENT_ID = process.env.LINKEDIN_CLIENT_ID || ''
 const LINKEDIN_CLIENT_SECRET = process.env.LINKEDIN_CLIENT_SECRET || ''
+const LINKEDIN_VERSION = '202601'
 
 export class LinkedInController {
 
@@ -43,6 +43,9 @@ export class LinkedInController {
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // PUBLICAR CON IMÁGENES (existente - ugcPosts legacy)
+  // ═══════════════════════════════════════════════════════════════
   static async createPost(req, reply) {
     const { access_token, user_id, text } = req.body
     if (!access_token || !user_id || !text) return reply.code(400).send({ ok: false, error: 'Faltan campos' })
@@ -63,6 +66,8 @@ export class LinkedInController {
         }),
       })
       if (response.status === 201) return reply.send({ ok: true, data: { postId: response.headers.get('X-RestLi-Id') } })
+      const errBody = await response.text()
+      console.error('❌ createPost error:', response.status, errBody)
       return reply.code(400).send({ ok: false, error: 'Error al publicar' })
     } catch (error) {
       return reply.code(500).send({ ok: false, error: 'Error al publicar' })
@@ -132,182 +137,190 @@ export class LinkedInController {
   }
 
   // ═══════════════════════════════════════════════════════════════
-  // ★★★ PDF A IMAGEN - USANDO PUPPETEER ★★★
+  // ★★★ NUEVO: PUBLICAR CON PDF COMO DOCUMENTO ★★★
+  // Usa la API nueva /rest/posts + /rest/documents
   // ═══════════════════════════════════════════════════════════════
-  static async pdfToImage(req, reply) {
-    const { pdf_url, certificate_id } = req.body
-    if (!pdf_url && !certificate_id) {
-      return reply.code(400).send({ ok: false, error: 'Falta pdf_url o certificate_id' })
+  static async createPostWithDocument(req, reply) {
+    const { access_token, user_id, text, images, certificate_id, pdf_base64: rawPdfBase64 } = req.body
+    if (!access_token || !user_id || !text) {
+      return reply.code(400).send({ ok: false, error: 'Faltan campos requeridos' })
     }
 
-    let browser = null
-
     try {
-      let pdfBase64
+      let pdfBuffer = null
+      let documentTitle = 'Certificado.pdf'
 
+      // ── 1. Obtener el PDF ──────────────────────────────────
       if (certificate_id) {
-        console.log('📄 Obteniendo PDF de Odoo ID:', certificate_id)
-        pdfBase64 = await odooService.getCertificatePdfBase64(certificate_id)
-        if (!pdfBase64) {
-          return reply.code(400).send({ ok: false, error: 'No se pudo obtener PDF de Odoo' })
+        console.log('📄 Obteniendo PDF de Odoo, certificate_id:', certificate_id)
+        const pdfBase64 = await odooService.getCertificatePdfBase64(certificate_id)
+        if (pdfBase64) {
+          pdfBuffer = Buffer.from(pdfBase64, 'base64')
+          documentTitle = `Certificado_${certificate_id}.pdf`
+          console.log('✅ PDF obtenido de Odoo, tamaño:', pdfBuffer.length, 'bytes')
+        } else {
+          console.warn('⚠️ No se pudo obtener PDF de Odoo, continuando sin documento')
         }
-        console.log('📄 PDF obtenido, longitud base64:', pdfBase64.length)
-      } else {
-        console.log('📄 Descargando PDF:', pdf_url)
-        const res = await fetch(pdf_url)
-        if (!res.ok) {
-          return reply.code(400).send({ ok: false, error: 'No se pudo descargar PDF' })
-        }
-        const buffer = Buffer.from(await res.arrayBuffer())
-        pdfBase64 = buffer.toString('base64')
+      } else if (rawPdfBase64) {
+        pdfBuffer = Buffer.from(rawPdfBase64, 'base64')
+        console.log('✅ PDF recibido directamente, tamaño:', pdfBuffer.length, 'bytes')
       }
 
-      console.log('🎨 Iniciando Puppeteer para renderizar PDF...')
-      
-      browser = await puppeteer.launch({
-        headless: 'new',
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-gpu',
-          '--font-render-hinting=none'
-        ]
-      })
+      // ── 2. Si hay PDF → subir como documento y publicar con /rest/posts ──
+      if (pdfBuffer) {
+        const documentUrn = await LinkedInController.uploadDocumentToLinkedIn(access_token, user_id, pdfBuffer)
 
-      const page = await browser.newPage()
+        if (documentUrn) {
+          console.log('📤 Publicando post con documento:', documentUrn)
+          
+          const postResponse = await fetch('https://api.linkedin.com/rest/posts', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${access_token}`,
+              'Content-Type': 'application/json',
+              'X-Restli-Protocol-Version': '2.0.0',
+              'LinkedIn-Version': LINKEDIN_VERSION,
+            },
+            body: JSON.stringify({
+              author: `urn:li:person:${user_id}`,
+              commentary: text,
+              visibility: 'PUBLIC',
+              distribution: {
+                feedDistribution: 'MAIN_FEED',
+                targetEntities: [],
+                thirdPartyDistributionChannels: []
+              },
+              content: {
+                media: {
+                  title: documentTitle,
+                  id: documentUrn
+                }
+              },
+              lifecycleState: 'PUBLISHED',
+              isReshareDisabledByAuthor: false
+            }),
+          })
 
-      // HTML con pdf.js - CENTRADO Y A TAMAÑO COMPLETO
-      const pdfJsHtml = `
-        <!DOCTYPE html>
-        <html>
-        <head>
-          <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-          <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            html, body { 
-              width: 100%; 
-              height: 100%; 
-              background: white;
-              display: flex;
-              align-items: center;
-              justify-content: center;
-            }
-            #canvas-container { 
-              display: flex; 
-              align-items: center;
-              justify-content: center;
-              width: 100%;
-              height: 100%;
-            }
-            canvas { 
-              display: block;
-              max-width: 100%;
-              max-height: 100%;
-            }
-          </style>
-        </head>
-        <body>
-          <div id="canvas-container">
-            <canvas id="pdf-canvas"></canvas>
-          </div>
-          <script>
-            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-            
-            const pdfData = atob('${pdfBase64}');
-            const pdfArray = new Uint8Array(pdfData.length);
-            for (let i = 0; i < pdfData.length; i++) {
-              pdfArray[i] = pdfData.charCodeAt(i);
-            }
-            
-            pdfjsLib.getDocument({ data: pdfArray }).promise.then(function(pdf) {
-              pdf.getPage(1).then(function(page) {
-                // Escala alta para buena calidad
-                const scale = 3.0;
-                const viewport = page.getViewport({ scale: scale });
-                
-                const canvas = document.getElementById('pdf-canvas');
-                const context = canvas.getContext('2d');
-                canvas.height = viewport.height;
-                canvas.width = viewport.width;
-                
-                // Fondo blanco
-                context.fillStyle = 'white';
-                context.fillRect(0, 0, canvas.width, canvas.height);
-                
-                page.render({
-                  canvasContext: context,
-                  viewport: viewport
-                }).promise.then(function() {
-                  window.pdfRendered = true;
-                  window.canvasWidth = canvas.width;
-                  window.canvasHeight = canvas.height;
-                });
-              });
-            });
-          </script>
-        </body>
-        </html>
-      `
+          if (postResponse.status === 201) {
+            const postId = postResponse.headers.get('x-restli-id')
+            console.log('✅ Post con documento publicado:', postId)
+            return reply.send({ ok: true, data: { postId, type: 'document', documentUrn } })
+          }
 
-      await page.setContent(pdfJsHtml, { waitUntil: 'networkidle0' })
-
-      // Esperar renderizado
-      console.log('⏳ Esperando renderizado del PDF...')
-      await page.waitForFunction('window.pdfRendered === true', { timeout: 30000 })
-      
-      // Pausa para asegurar renderizado completo
-      await new Promise(resolve => setTimeout(resolve, 500))
-
-      // Obtener dimensiones reales del canvas
-      const dimensions = await page.evaluate(() => ({
-        width: window.canvasWidth,
-        height: window.canvasHeight
-      }))
-
-      console.log('📐 Dimensiones del canvas:', dimensions)
-
-      // Ajustar viewport al tamaño del canvas
-      await page.setViewport({
-        width: dimensions.width,
-        height: dimensions.height,
-        deviceScaleFactor: 1
-      })
-
-      // Esperar un momento después de resize
-      await new Promise(resolve => setTimeout(resolve, 300))
-
-      // Screenshot SOLO del canvas (no de toda la página)
-      const canvas = await page.$('#pdf-canvas')
-      const imageBuffer = await canvas.screenshot({ 
-        type: 'png',
-        omitBackground: false
-      })
-
-      await browser.close()
-      browser = null
-
-      const imageBase64 = imageBuffer.toString('base64')
-      console.log('✅ PDF renderizado correctamente, tamaño:', imageBuffer.length, 'bytes')
-
-      return reply.send({
-        ok: true,
-        data: {
-          image_base64: imageBase64,
-          width: dimensions.width,
-          height: dimensions.height
+          const errBody = await postResponse.text()
+          console.error('❌ Error publicando con documento:', postResponse.status, errBody)
+          
+          // Si falla el documento, intentar con imágenes como fallback
+          console.log('🔄 Fallback: publicando solo con imágenes...')
+        } else {
+          console.warn('⚠️ No se pudo subir documento, fallback a imágenes')
         }
+      }
+
+      // ── 3. Fallback: publicar con imágenes (si hay) ──────
+      const assets = []
+      if (images?.length) {
+        console.log(`📤 Fallback: subiendo ${images.length} imágenes...`)
+        for (let i = 0; i < images.length; i++) {
+          const asset = await LinkedInController.uploadImageToLinkedIn(access_token, user_id, images[i])
+          if (asset) { assets.push(asset); console.log(`✅ Imagen ${i + 1} subida`) }
+        }
+      }
+
+      console.log('📤 Publicando con', assets.length, 'imágenes (fallback)')
+      const response = await fetch('https://api.linkedin.com/v2/ugcPosts', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${access_token}`, 'Content-Type': 'application/json', 'X-Restli-Protocol-Version': '2.0.0' },
+        body: JSON.stringify({
+          author: `urn:li:person:${user_id}`,
+          lifecycleState: 'PUBLISHED',
+          specificContent: {
+            'com.linkedin.ugc.ShareContent': {
+              shareCommentary: { text },
+              shareMediaCategory: assets.length ? 'IMAGE' : 'NONE',
+              ...(assets.length && { media: assets.map(a => ({ status: 'READY', media: a })) })
+            }
+          },
+          visibility: { 'com.linkedin.ugc.MemberNetworkVisibility': 'PUBLIC' }
+        }),
       })
+
+      if (response.status === 201) {
+        return reply.send({ ok: true, data: { postId: response.headers.get('X-RestLi-Id'), type: 'images', imagesCount: assets.length } })
+      }
+
+      const errText = await response.text()
+      console.error('❌ Error fallback imágenes:', response.status, errText)
+      return reply.code(400).send({ ok: false, error: 'Error al publicar' })
 
     } catch (error) {
-      console.error('❌ Error PDF:', error.message)
-      if (browser) {
-        await browser.close()
-      }
-      return reply.code(500).send({ ok: false, error: error.message })
+      console.error('❌ Error general createPostWithDocument:', error)
+      return reply.code(500).send({ ok: false, error: error.message || 'Error al publicar' })
     }
   }
 
+  // ═══════════════════════════════════════════════════════════════
+  // ★ UPLOAD: Documento PDF a LinkedIn (Documents API)
+  // ═══════════════════════════════════════════════════════════════
+  static async uploadDocumentToLinkedIn(token, userId, pdfBuffer) {
+    try {
+      // Paso 1: Inicializar upload
+      console.log('📤 [Documents API] Inicializando upload...')
+      const initResponse = await fetch('https://api.linkedin.com/rest/documents?action=initializeUpload', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'X-Restli-Protocol-Version': '2.0.0',
+          'LinkedIn-Version': LINKEDIN_VERSION,
+        },
+        body: JSON.stringify({
+          initializeUploadRequest: {
+            owner: `urn:li:person:${userId}`
+          }
+        }),
+      })
+
+      const initData = await initResponse.json()
+
+      if (!initData.value) {
+        console.error('❌ [Documents API] Error al inicializar:', JSON.stringify(initData))
+        return null
+      }
+
+      const uploadUrl = initData.value.uploadUrl
+      const documentUrn = initData.value.document
+      console.log('✅ [Documents API] Upload URL obtenida, URN:', documentUrn)
+
+      // Paso 2: Subir el PDF binario
+      console.log('📤 [Documents API] Subiendo PDF...', pdfBuffer.length, 'bytes')
+      const uploadResponse = await fetch(uploadUrl, {
+        method: 'PUT',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/pdf',
+        },
+        body: pdfBuffer,
+      })
+
+      if (uploadResponse.status === 200 || uploadResponse.status === 201) {
+        console.log('✅ [Documents API] PDF subido exitosamente')
+        return documentUrn
+      }
+
+      const uploadErr = await uploadResponse.text()
+      console.error('❌ [Documents API] Error al subir PDF:', uploadResponse.status, uploadErr)
+      return null
+
+    } catch (error) {
+      console.error('❌ [Documents API] Error:', error.message)
+      return null
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // UPLOAD: Imagen a LinkedIn (legacy assets API)
+  // ═══════════════════════════════════════════════════════════════
   static async uploadImageToLinkedIn(token, userId, base64) {
     try {
       const reg = await fetch('https://api.linkedin.com/v2/assets?action=registerUpload', {
@@ -335,7 +348,7 @@ export class LinkedInController {
 
       return (up.status === 200 || up.status === 201) ? asset : null
     } catch (e) {
-      console.error('Upload error:', e)
+      console.error('Upload image error:', e)
       return null
     }
   }

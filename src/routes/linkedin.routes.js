@@ -5,14 +5,16 @@ export default async function linkedinRoutes(fastify) {
   // Intercambiar código por token
   fastify.post('/exchange-token', LinkedInController.exchangeToken)
   
-  // Publicar post (sin imagen)
+  // Publicar post (sin media)
   fastify.post('/post', LinkedInController.createPost)
   
-  // ★ NUEVO: Publicar post con imagen
+  // Publicar post con imagen
   fastify.post('/post-with-image', LinkedInController.createPostWithImage)
 
+  // Publicar post con múltiples imágenes
   fastify.post('/post-with-images', LinkedInController.createPostWithImages)
-  
-  // ★ NUEVO: Convertir PDF a imagen
-  fastify.post('/pdf-to-image', LinkedInController.pdfToImage)
+
+  // ★ NUEVO: Publicar con PDF como documento nativo de LinkedIn
+  // Si falla el documento, hace fallback a imágenes
+  fastify.post('/post-with-document', LinkedInController.createPostWithDocument)
 }
